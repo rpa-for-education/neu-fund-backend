@@ -19,7 +19,7 @@ const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
 const QDRANT_COLLECTION = process.env.QDRANT_COLLECTION || "fund";
 
 const EMBEDDING_MODEL =
-  process.env.EMBEDDING_MODEL || "all-MiniLM-L6-v2"; // dùng cùng model lúc index!
+  process.env.EMBEDDING_MODEL || "all-MiniLM-L6-v2";
 
 /* ===================== Basic checks ===================== */
 if (!MONGO_URI) {
@@ -42,6 +42,7 @@ let db;
 let fundlogs;
 
 async function connectMongo() {
+  if (fundlogs) return; // tránh connect lại nhiều lần trên Vercel
   mongoClient = new MongoClient(MONGO_URI);
   await mongoClient.connect();
   db = mongoClient.db(MONGO_DB);
@@ -54,7 +55,6 @@ console.log("🔧 Using Qdrant URL:", QDRANT_URL);
 const qdrant = new QdrantClient({
   url: QDRANT_URL,
   apiKey: QDRANT_API_KEY,
-  // cảnh báo "Failed to obtain server version" từ js-client-rest có thể bỏ qua
 });
 
 /* ===================== Embeddings (Xenova) ===================== */
@@ -135,7 +135,8 @@ function buildPrompt(question, hits = []) {
 }
 
 /* ===================== Routes ===================== */
-app.get("/api/health", (_req, res) => {
+app.get("/api/health", async (_req, res) => {
+  await connectMongo();
   res.json({
     status: "ok",
     mongo_db: MONGO_DB,
@@ -146,17 +147,11 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-/**
- * POST /api/ask
- * body: { question: string, topk?: number, withLLM?: boolean, model_id?: string }
- * - Mã hoá question -> vector bằng Xenova/all-MiniLM-L6-v2
- * - Qdrant Cloud search -> lấy topk
- * - (Optional) Gọi LLM theo model_id cấu hình trong llm.js (qwen/openai/gemini)
- * - Ghi log vào MongoDB collection fundlogs
- */
 app.post("/api/ask", async (req, res) => {
   const startedAt = new Date();
   try {
+    await connectMongo();
+
     const { question, topk = 5, withLLM = true, model_id = "qwen-max" } = req.body || {};
     if (!question?.trim()) {
       return res.status(400).json({ error: "Thiếu 'question'" });
@@ -206,13 +201,12 @@ app.post("/api/ask", async (req, res) => {
         provider,
         model: resolvedModel,
         topk: k,
-        hits: hits.slice(0, 5), // log gọn
+        hits: hits.slice(0, 5),
       });
     } catch (e) {
       console.error("⚠️ Cannot write fundlogs:", e.message);
     }
 
-    // 5) Response
     return res.json({
       model_id,
       provider,
@@ -227,7 +221,6 @@ app.post("/api/ask", async (req, res) => {
     });
   } catch (err) {
     console.error("❌ /api/ask error:", err?.response?.data || err.message);
-    // cố gắng log lỗi
     try {
       await fundlogs.insertOne({
         question: req.body?.question || null,
@@ -245,15 +238,21 @@ app.post("/api/ask", async (req, res) => {
 });
 
 /* ===================== Boot ===================== */
-(async () => {
-  try {
-    await connectMongo(); // kết nối Mongo trước
-    await getEmbedder();  // warm-up embedder (tuỳ, có thể bỏ nếu muốn lazy)
-    app.listen(PORT, () => {
-      console.log(`🚀 API running at http://localhost:${PORT}`);
-    });
-  } catch (e) {
-    console.error("❌ Startup error:", e.message);
-    process.exit(1);
-  }
-})();
+if (process.env.NODE_ENV !== "production") {
+  // Local: chạy express server
+  (async () => {
+    try {
+      await connectMongo();
+      await getEmbedder();
+      app.listen(PORT, () => {
+        console.log(`🚀 API running at http://localhost:${PORT}`);
+      });
+    } catch (e) {
+      console.error("❌ Startup error:", e.message);
+      process.exit(1);
+    }
+  })();
+}
+
+// ✅ Export cho Vercel
+export default app;
