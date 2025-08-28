@@ -3,7 +3,7 @@ import pandas as pd
 from pymongo import MongoClient
 
 # 1. Đọc file CSV
-csv_path = "grants-gov-opp-search--20250828210202.csv"
+csv_path = "grants-data.csv"
 df = pd.read_csv(csv_path)
 
 # 2. Kết nối MongoDB
