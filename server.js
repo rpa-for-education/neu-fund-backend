@@ -6,6 +6,7 @@ import { MongoClient } from "mongodb";
 import { QdrantClient } from "@qdrant/js-client-rest";
 import { pipeline } from "@xenova/transformers";
 import { callLLM } from "./llm.js";
+import { encode } from "gpt-tokenizer";
 
 /* ===================== Env & constants ===================== */
 const PORT = process.env.PORT || 4000;
@@ -146,6 +147,211 @@ app.get("/api/health", async (_req, res) => {
     time: new Date().toISOString(),
   });
 });
+
+/* ===================== Fund APIs ===================== */
+
+// GET /api/fund/:id  → lấy 1 record từ Qdrant
+app.get("/api/fund/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: "Thiếu id" });
+
+    const record = await qdrant.retrieve(QDRANT_COLLECTION, {
+      ids: [id],
+      with_payload: true,
+      with_vector: false,
+    });
+
+    if (!record || record.length === 0) {
+      return res.status(404).json({ error: "Không tìm thấy fund" });
+    }
+
+    return res.json(record[0]);
+  } catch (err) {
+    console.error("❌ /api/fund/:id error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/fund  → liệt kê danh sách fund (có phân trang + filter q)
+app.get("/api/fund", async (req, res) => {
+  try {
+    const { page = 1, limit = 20, q } = req.query;
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
+
+    // Nếu có query q thì tìm theo vector
+    if (q && q.trim()) {
+      const queryVector = await embedText(q);
+      const results = await qdrant.search(QDRANT_COLLECTION, {
+        vector: queryVector,
+        limit: pageSize,
+        with_payload: true,
+        with_vector: false,
+      });
+
+      return res.json({
+        page: pageNum,
+        limit: pageSize,
+        total: results.length,
+        items: results.map(r => ({
+          id: r.id,
+          score: r.score,
+          payload: r.payload,
+        })),
+      });
+    }
+
+    // Nếu không có query thì scan toàn bộ (theo offset)
+    const offset = (pageNum - 1) * pageSize;
+    const resQdrant = await qdrant.scroll(QDRANT_COLLECTION, {
+      limit: pageSize,
+      offset,
+      with_payload: true,
+      with_vector: false,
+    });
+
+    return res.json({
+      page: pageNum,
+      limit: pageSize,
+      next_page_offset: resQdrant.next_page_offset || null,
+      items: (resQdrant.points || []).map(p => ({
+        id: p.id,
+        payload: p.payload,
+      })),
+    });
+  } catch (err) {
+    console.error("❌ /api/fund error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ===================== Agent API (chuẩn backend cho worker) ===================== */
+/**
+ * Body:
+ *  {
+ *    "question": "string",
+ *    "model_id": "qwen-max" | ...,
+ *    "topk": number
+ *  }
+ *
+ * Trả về (tương thích worker /v1/ask):
+ *  {
+ *    "model_id": "...",
+ *    "answer": { "answer": "markdown", "model": "...", "provider": "..." },
+ *    "retrieved": { "fund": [ { id, score, payload }, ... ] },
+ *    "meta": { "response_time_ms": ..., "tokens_used": ..., "prompt_tokens": ..., "answer_tokens": ... }
+ *  }
+ */
+app.post("/api/agent", async (req, res) => {
+  const startedAt = Date.now();
+  try {
+    await connectMongo();
+
+    const { question, model_id = "qwen-max", topk = 5 } = req.body || {};
+    if (!question?.trim()) {
+      return res.status(400).json({ error: "Missing 'question'" });
+    }
+    const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
+
+    // 1) Embed & search Qdrant (fund collection)
+    const queryVector = await embedText(question);
+    const results = await qdrant.search(QDRANT_COLLECTION, {
+      vector: queryVector,
+      limit: k,
+      with_payload: true,
+      with_vector: false,
+    });
+
+    const hits = (results || []).map(r => ({
+      id: r.id,
+      score: r.score,
+      payload: r.payload || {},
+    }));
+
+    // 2) Gọi LLM với prompt đã chuẩn hoá cho fund
+    const prompt = buildPrompt(question, hits);
+    const llmRes = await callLLM(prompt, model_id);
+
+    // Chuẩn hoá output từ callLLM (chấp nhận cả kiểu string hoặc object tuỳ provider)
+    let text = "";
+    let provider = null;
+    let resolvedModel = model_id;
+
+    if (typeof llmRes === "string") {
+      text = llmRes;
+    } else if (llmRes && typeof llmRes === "object") {
+      text = llmRes.answer ?? llmRes.text ?? llmRes.content ?? "";
+      provider = llmRes.provider ?? null;
+      resolvedModel = llmRes.model ?? resolvedModel;
+    }
+
+    // 3) Meta (thống kê token, thời gian)
+    let prompt_tokens = null;
+    let answer_tokens = null;
+    let tokens_used = null;
+    try {
+      prompt_tokens = encode(prompt).length;
+      answer_tokens = encode(text).length;
+      tokens_used = prompt_tokens + answer_tokens;
+    } catch (_) {}
+
+    const response_time_ms = Date.now() - startedAt;
+
+    // 4) Ghi log (không phá vỡ logic cũ)
+    try {
+      await fundlogs.insertOne({
+        question,
+        asked_at: new Date(startedAt),
+        answer: text,
+        answered_at: new Date(),
+        withLLM: true,
+        model_id,
+        provider,
+        model: resolvedModel,
+        topk: k,
+        hits: hits.slice(0, 5),
+        meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
+      });
+    } catch (e) {
+      console.error("⚠️ Cannot write fundlogs (/api/agent):", e.message);
+    }
+
+    // 5) Trả về đúng shape mà Cloudflare worker đang dùng
+    return res.json({
+      model_id,
+      answer: {
+        answer: text,          // worker đọc: data.answer.answer
+        model: resolvedModel,  // worker đọc: data.answer.model
+        provider,
+      },
+      retrieved: { fund: hits },
+      meta: {
+        response_time_ms,
+        tokens_used,
+        prompt_tokens,
+        answer_tokens,
+      },
+    });
+  } catch (err) {
+    console.error("❌ /api/agent error:", err?.response?.data || err.message);
+    try {
+      await fundlogs.insertOne({
+        question: req.body?.question || null,
+        asked_at: new Date(startedAt),
+        error: err.message || String(err),
+        withLLM: true,
+        model_id: req.body?.model_id || "qwen-max",
+        route: "/api/agent",
+      });
+    } catch (_) {}
+    return res.status(500).json({
+      error: err.message || "Internal error",
+      detail: err?.response?.data,
+    });
+  }
+});
+
 
 app.post("/api/ask", async (req, res) => {
   const startedAt = new Date();
