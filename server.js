@@ -6,7 +6,7 @@ import { MongoClient } from "mongodb";
 import { QdrantClient } from "@qdrant/js-client-rest";
 import { pipeline } from "@xenova/transformers";
 import { callLLM } from "./llm.js";
-import { encode } from "gpt-tokenizer";
+import { encode } from "gpt-tokenizer"; 
 
 /* ===================== Env & constants ===================== */
 const PORT = process.env.PORT || 4000;
@@ -34,8 +34,8 @@ if (!QDRANT_URL || !QDRANT_API_KEY) {
 
 /* ===================== Express ===================== */
 const app = express();
-app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(cors()); // ✅ Cho phép mọi origin gọi API
+app.use(express.json({ limit: "10mb" }));
 
 /* ===================== MongoDB ===================== */
 let mongoClient;
@@ -227,22 +227,6 @@ app.get("/api/fund", async (req, res) => {
 });
 
 /* ===================== Agent API (chuẩn backend cho worker) ===================== */
-/**
- * Body:
- *  {
- *    "question": "string",
- *    "model_id": "qwen-max" | ...,
- *    "topk": number
- *  }
- *
- * Trả về (tương thích worker /v1/ask):
- *  {
- *    "model_id": "...",
- *    "answer": { "answer": "markdown", "model": "...", "provider": "..." },
- *    "retrieved": { "fund": [ { id, score, payload }, ... ] },
- *    "meta": { "response_time_ms": ..., "tokens_used": ..., "prompt_tokens": ..., "answer_tokens": ... }
- *  }
- */
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
   try {
