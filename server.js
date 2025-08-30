@@ -1,4 +1,3 @@
-// server.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -120,6 +119,7 @@ app.get("/api/funds", async (req, res) => {
   try {
     const { q } = req.query;
     const { limit, skip, page } = getPagination(req);
+    const safeLimit = limit || 50; // default 50
 
     const filter = buildSearchFilter(q, [
       "OPPORTUNITY TITLE",
@@ -128,26 +128,33 @@ app.get("/api/funds", async (req, res) => {
     ]);
 
     const col = await Funds();
-    const cursor = col.find(filter).sort({ POSTED_DATE: -1 });
 
-    let items, total;
-    if (!limit) {
-      items = await cursor.toArray();
-      total = items.length;
-    } else {
-      [items, total] = await Promise.all([
-        cursor.skip(skip).limit(limit).toArray(),
-        col.countDocuments(filter),
-      ]);
-    }
+    const pipeline = [];
+    if (Object.keys(filter).length) pipeline.push({ $match: filter });
 
-    // Chỉ giữ lại 2 trường name và url
-    items = items.map((item) => ({
-      name: item["OPPORTUNITY TITLE"],
-      url: item["OPPORTUNITY URL"],
-    }));
+    pipeline.push({ $sort: { POSTED_DATE: -1 } });
 
-    res.json({ page, limit: limit || total, total, items });
+    pipeline.push({
+      $facet: {
+        items: [
+          { $skip: skip },
+          { $limit: safeLimit },
+          {
+            $project: {
+              name: "$OPPORTUNITY TITLE",
+              url: "$OPPORTUNITY URL",
+            },
+          },
+        ],
+        total: [{ $count: "count" }],
+      },
+    });
+
+    const result = await col.aggregate(pipeline, { allowDiskUse: true }).toArray();
+    const { items, total } = result[0];
+    const totalCount = total[0]?.count || 0;
+
+    res.json({ page, limit: safeLimit, total: totalCount, items });
   } catch (err) {
     console.error(err);
     res
@@ -155,7 +162,6 @@ app.get("/api/funds", async (req, res) => {
       .json({ error: "Failed to fetch funds", detail: err.message });
   }
 });
-
 
 /* ===================== Agent API ===================== */
 app.post("/api/agent", async (req, res) => {
@@ -172,7 +178,7 @@ app.post("/api/agent", async (req, res) => {
     let hits = [];
     try {
       hits = await fundVectorSearch(question, k);
-      hits = hits.map(({ VECTOR, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest); // Ẩn luôn ở đây
+      hits = hits.map(({ VECTOR, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest);
     } catch (e) {
       console.error("⚠️ fundVectorSearch failed:", e);
       hits = [];
