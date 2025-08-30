@@ -123,14 +123,6 @@ app.get("/api/funds", async (req, res) => {
 
     const filter = buildSearchFilter(q, [
       "OPPORTUNITY TITLE",
-      "AGENCY NAME",
-      "AGENCY CODE",
-      "ASSISTANCE LISTINGS",
-      "GRANTOR CONTACT",
-      "GRANTOR CONTACT EMAIL",
-      "FUNDING DESCRIPTION",
-      "ELIGIBLE APPLICANTS",
-      "OPPORTUNITY ID",
       "OPPORTUNITY URL",
       "_key",
     ]);
@@ -149,41 +141,11 @@ app.get("/api/funds", async (req, res) => {
       ]);
     }
 
-    // Ẩn các trường không muốn hiển thị
-    items = items.map(({
-      vector,
-      _id,
-      "AGENCY CODE": agencyCode,
-      "AGENCY NAME": agencyName,
-      "CATEGORY OF FUNDING ACTIVITY": categoryFunding,
-      "FUNDING CATEGORY EXPLANATION": fundingCategoryExplanation,
-      "FUNDING INSTRUMENT TYPE": fundingInstrumentType,
-      "ASSISTANCE LISTINGS": assistanceListings,
-      "OPPORTUNITY NUMBER": opportunityNumber,
-      "EXPECTED NUMBER OF AWARDS": expectedAwards,
-      "AWARD CEILING": awardCeiling,
-      "AWARD FLOOR": awardFloor,
-      "COST SHARING / MATCH REQUIREMENT": costSharing,
-      "LINK TO ADDITIONAL INFORMATION": linkInfo,
-      "GRANTOR CONTACT": grantorContact,
-      "GRANTOR CONTACT PHONE": grantorPhone,
-      "GRANTOR CONTACT EMAIL": grantorEmail,
-      "ESTIMATED POST DATE": estimatedPostDate,
-      "ESTIMATED APPLICATION DUE DATE": estimatedDueDate,
-      "ESTIMATED TOTAL FUNDING": estimatedTotalFunding,
-      "LAST UPDATED DATE/TIME": lastUpdated,
-      "POSTED DATE": postedDate,
-      "CLOSE DATE": closeDate,
-      "OPPORTUNITY STATUS": opportunityStatus,
-      "ELIGIBLE APPLICANTS": eligibleApplicants,
-      "OPPORTUNITY CODE": opportunityCode,
-      "VERSION": version,
-      "OPPORTUNITY PACKAGE": oppPackage,
-      "SYNOPSIS ARCHIVED": synopsisArchived,
-      "u_key": uKey,
-      "FUNDING DESCRIPTION": fundingDescription,
-      ...rest
-    }) => rest);
+    // Chỉ giữ lại 2 trường name và url
+    items = items.map((item) => ({
+      Name: item["OPPORTUNITY TITLE"],
+      URL: item["OPPORTUNITY URL"],
+    }));
 
     res.json({ page, limit: limit || total, total, items });
   } catch (err) {
@@ -193,6 +155,7 @@ app.get("/api/funds", async (req, res) => {
       .json({ error: "Failed to fetch funds", detail: err.message });
   }
 });
+
 
 /* ===================== Agent API ===================== */
 app.post("/api/agent", async (req, res) => {
