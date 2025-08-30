@@ -54,6 +54,27 @@ function buildPrompt(question, hits = []) {
   return `${header}\nCâu hỏi người dùng: "${question}"\n\nNgữ cảnh:\n${ctx}\n\nYêu cầu: Trả lời bằng TIẾNG VIỆT, liệt kê gọn, có tiêu đề từng cơ hội, nêu lý do phù hợp (theo chủ đề/đối tượng/quốc gia), thêm link nếu có.`;
 }
 
+/* ===================== New Helpers for /api/funds ===================== */
+function getPagination(req) {
+  const page = parseInt(req.query.page) > 0 ? parseInt(req.query.page) : 1;
+  const limit = parseInt(req.query.limit) > 0 ? parseInt(req.query.limit) : 0;
+  const skip = limit ? (page - 1) * limit : 0;
+  return { page, limit, skip };
+}
+
+function buildSearchFilter(q, fields = []) {
+  if (!q) return {};
+  const regex = { $regex: q, $options: "i" };
+  return {
+    $or: fields.map((field) => ({ [field]: regex })),
+  };
+}
+
+async function Funds() {
+  const db = await getDb();
+  return db.collection(MONGO_COLLECTION);
+}
+
 /* ===================== Routes ===================== */
 app.get("/api/health", async (_req, res) => {
   try {
@@ -79,31 +100,27 @@ app.get("/api/health", async (_req, res) => {
 });
 
 /* ===================== Fund APIs ===================== */
-
 app.get("/api/funds", async (req, res) => {
   try {
     const { q } = req.query;
     const { limit, skip, page } = getPagination(req);
 
-    // các trường sẽ cho phép search
     const filter = buildSearchFilter(q, [
-      "OPPORTUNITY_TITLE",
-      "AGENCY_NAME",
-      "AGENCY_CODE",
-      "OPPORTUNITY_NUMBER",
-      "ASSISTANCE_LISTINGS",
-      "GRANTOR_CONTACT",
-      "GRANTOR_CONTACT_EMAIL",
-      "FUNDING_DESCRIPTION",
-      "ELIGIBLE_APPLICANTS",
-      "OPPORTUNITY_ID",
-      "OPPORTUNITY_URL",
-      "_key"
+      "OPPORTUNITY TITLE",
+      "AGENCY NAME",
+      "AGENCY CODE",
+      "OPPORTUNITY NUMBER",
+      "ASSISTANCE LISTINGS",
+      "GRANTOR CONTACT",
+      "GRANTOR CONTACT EMAIL",
+      "FUNDING DESCRIPTION",
+      "ELIGIBLE APPLICANTS",
+      "OPPORTUNITY ID",
+      "OPPORTUNITY URL",
+      "_key",
     ]);
 
     const col = await Funds();
-
-    // Query
     const cursor = col.find(filter).sort({ POSTED_DATE: -1 });
 
     let items, total;
@@ -113,24 +130,16 @@ app.get("/api/funds", async (req, res) => {
     } else {
       [items, total] = await Promise.all([
         cursor.skip(skip).limit(limit).toArray(),
-        col.countDocuments(filter)
+        col.countDocuments(filter),
       ]);
     }
 
-    res.json({
-      page,
-      limit: limit || total,
-      total,
-      items
-    });
-
+    res.json({ page, limit: limit || total, total, items });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch funds", detail: err.message });
   }
 });
-
-
 
 /* ===================== Agent API ===================== */
 app.post("/api/agent", async (req, res) => {
@@ -143,16 +152,14 @@ app.post("/api/agent", async (req, res) => {
     if (!question?.trim()) return res.status(400).json({ error: "Missing 'question'" });
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
 
-    // 1) Vector search trong MongoDB (reuse search.js)
     let hits = [];
     try {
       hits = await fundVectorSearch(question, k);
     } catch (e) {
       console.error("⚠️ fundVectorSearch failed:", e);
-      hits = []; // fallback rỗng
+      hits = [];
     }
 
-    // 2) Gọi LLM
     const prompt = buildPrompt(question, hits);
     const llmRes = await callLLM(prompt, model_id);
 
@@ -166,8 +173,9 @@ app.post("/api/agent", async (req, res) => {
       resolvedModel = llmRes.model ?? resolvedModel;
     }
 
-    // 3) Meta
-    let prompt_tokens = null, answer_tokens = null, tokens_used = null;
+    let prompt_tokens = null,
+      answer_tokens = null,
+      tokens_used = null;
     try {
       prompt_tokens = encode(prompt).length;
       answer_tokens = encode(text).length;
@@ -175,7 +183,6 @@ app.post("/api/agent", async (req, res) => {
     } catch (_) {}
     const response_time_ms = Date.now() - startedAt;
 
-    // 4) Ghi log (non-fatal)
     try {
       await fundlogs.insertOne({
         question,
@@ -195,14 +202,9 @@ app.post("/api/agent", async (req, res) => {
       console.error("⚠️ Cannot write fundlogs:", e);
     }
 
-    // 5) Trả về client — giữ shape quen thuộc
     return res.json({
       model_id,
-      answer: {
-        answer: text,
-        model: resolvedModel,
-        provider,
-      },
+      answer: { answer: text, model: resolvedModel, provider },
       retrieved: { fund: hits },
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
