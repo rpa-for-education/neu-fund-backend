@@ -175,7 +175,7 @@ app.get("/api/funds", async (req, res) => {
       "u_key": uKey,
       "FUNDING DESCRIPTION": fundingDescription,
       ...rest
-  }) => rest);
+    }) => rest);
 
     res.json({ page, limit: limit || total, total, items });
   } catch (err) {
