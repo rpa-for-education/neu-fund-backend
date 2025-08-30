@@ -143,8 +143,8 @@ app.get("/api/funds", async (req, res) => {
 
     // Chỉ giữ lại 2 trường name và url
     items = items.map((item) => ({
-      Name: item["OPPORTUNITY TITLE"],
-      URL: item["OPPORTUNITY URL"],
+      name: item["OPPORTUNITY TITLE"],
+      url: item["OPPORTUNITY URL"],
     }));
 
     res.json({ page, limit: limit || total, total, items });
