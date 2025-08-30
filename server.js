@@ -3,7 +3,6 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { ObjectId } from "mongodb";
-import { pipeline } from "@xenova/transformers";
 import { callLLM } from "./llm.js";
 import { encode } from "gpt-tokenizer";
 import { getDb } from "./db.js";
@@ -13,29 +12,11 @@ import { fundVectorSearch, initEmbedding } from "./search.js";
 const PORT = process.env.PORT || 4000;
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
-const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "Xenova/paraphrase-multilingual-mpnet-base-v2";
 
 /* ===================== Express ===================== */
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
-
-/* ===================== Embeddings (lazy for health info) ===================== */
-let embedder = null;
-async function getEmbedder() {
-  if (!embedder) {
-    const modelName = EMBEDDING_MODEL.startsWith("Xenova/") ? EMBEDDING_MODEL : `Xenova/${EMBEDDING_MODEL}`;
-    console.log(`🔗 Loading embedding model (${modelName})...`);
-    embedder = await pipeline("feature-extraction", modelName);
-    console.log("✅ Embedding model loaded");
-  }
-  return embedder;
-}
-async function embedText(text) {
-  const e = await getEmbedder();
-  const out = await e(text, { pooling: "mean", normalize: true });
-  return Array.from(out.data);
-}
 
 /* ===================== Helpers ===================== */
 const pick = (v) => v ?? "";
@@ -61,7 +42,8 @@ function summarizeFundPayload(p = {}) {
 }
 
 function buildPrompt(question, hits = []) {
-  const header = "Bạn là trợ lý hỗ trợ tìm kiếm quỹ tài trợ. Dựa trên danh sách cơ hội bên dưới, hãy trả lời ngắn gọn, đưa ra 3–5 cơ hội phù hợp nhất, kèm lý do khớp và lưu ý về eligibility.\n";
+  const header =
+    "Bạn là trợ lý hỗ trợ tìm kiếm quỹ tài trợ. Dựa trên danh sách cơ hội bên dưới, hãy trả lời ngắn gọn, đưa ra 3–5 cơ hội phù hợp nhất, kèm lý do khớp và lưu ý về eligibility.\n";
   const ctx =
     hits.length > 0
       ? hits
@@ -76,18 +58,22 @@ function buildPrompt(question, hits = []) {
 app.get("/api/health", async (_req, res) => {
   try {
     const db = await getDb();
-    await initEmbedding();
+    // đảm bảo embedder được khởi tạo sớm (giảm cold start trên dev)
+    await initEmbedding().catch((e) => {
+      console.warn("⚠️ initEmbedding warning:", e?.message || e);
+    });
     res.json({
       status: "ok",
       db: "connected",
       collection: MONGO_COLLECTION,
-      embedding_model: EMBEDDING_MODEL,
+      embedding_model: process.env.EMBEDDING_MODEL || null,
       time: new Date().toISOString(),
       counts: {
         fund: await db.collection(MONGO_COLLECTION).estimatedDocumentCount(),
       },
     });
   } catch (e) {
+    console.error("❌ /api/health error:", e);
     res.status(500).json({ status: "error", error: e.message });
   }
 });
@@ -99,11 +85,12 @@ app.get("/api/fund/:id", async (req, res) => {
   try {
     const db = await getDb();
     const { id } = req.params;
+    if (!id) return res.status(400).json({ error: "Thiếu id" });
     const doc = await db.collection(MONGO_COLLECTION).findOne({ _id: new ObjectId(id) }, { projection: { vector: 0 } });
     if (!doc) return res.status(404).json({ error: "Không tìm thấy fund" });
-    res.json({ ...doc, _id: String(doc._id) });
+    return res.json({ ...doc, _id: String(doc._id) });
   } catch (err) {
-    console.error("❌ /api/fund/:id error:", err.message);
+    console.error("❌ /api/fund/:id error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -119,41 +106,34 @@ app.get("/api/fund", async (req, res) => {
     const skip = (pageNum - 1) * pageSize;
 
     if (q && q.trim()) {
-      // Vector search
-      const queryVector = await embedText(q);
-      const pipelineAgg = [
-        {
-          $vectorSearch: {
-            index: process.env.VECTOR_INDEX_FUND || "vector_index_fund",
-            path: "vector",
-            queryVector,
-            numCandidates: 200,
-            limit: pageSize,
-            similarity: "cosine",
-          },
-        },
-        { $project: { vector: 0, score: { $meta: "vectorSearchScore" } } },
-      ];
-      const items = await col.aggregate(pipelineAgg).toArray();
-      return res.json({
-        page: 1,
-        limit: pageSize,
-        total: items.length,
-        items: items.map(d => ({ ...d, _id: String(d._id) })),
-      });
+      // DÙNG fundVectorSearch từ search.js (an toàn, dùng cùng embedder và index)
+      try {
+        const hits = await fundVectorSearch(q, pageSize);
+        // fundVectorSearch đã loại vector ra trong projection
+        return res.json({
+          page: 1,
+          limit: pageSize,
+          total: hits.length,
+          items: hits.map(d => ({ ...d, _id: String(d._id) })),
+        });
+      } catch (err) {
+        console.error("❌ Vector search error:", err);
+        // nếu vector search lỗi, trả về 500 với message rõ
+        return res.status(500).json({ error: "Vector search failed", detail: err?.message || err });
+      }
     }
 
-    // Listing thường
+    // Listing thường (phân trang)
     const cursor = col.find({}, { projection: { vector: 0 } }).sort({ "POSTED DATE": -1 }).skip(skip).limit(pageSize);
     const [items, total] = await Promise.all([cursor.toArray(), col.estimatedDocumentCount()]);
-    res.json({
+    return res.json({
       page: pageNum,
       limit: pageSize,
       total,
       items: items.map(d => ({ ...d, _id: String(d._id) })),
     });
   } catch (err) {
-    console.error("❌ /api/fund error:", err.message);
+    console.error("❌ /api/fund error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -169,8 +149,14 @@ app.post("/api/agent", async (req, res) => {
     if (!question?.trim()) return res.status(400).json({ error: "Missing 'question'" });
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
 
-    // 1) Vector search trong MongoDB
-    const hits = await fundVectorSearch(question, k);
+    // 1) Vector search trong MongoDB (reuse search.js)
+    let hits = [];
+    try {
+      hits = await fundVectorSearch(question, k);
+    } catch (e) {
+      console.error("⚠️ fundVectorSearch failed:", e);
+      hits = []; // fallback rỗng
+    }
 
     // 2) Gọi LLM
     const prompt = buildPrompt(question, hits);
@@ -195,7 +181,7 @@ app.post("/api/agent", async (req, res) => {
     } catch (_) {}
     const response_time_ms = Date.now() - startedAt;
 
-    // 4) Ghi log
+    // 4) Ghi log (non-fatal)
     try {
       await fundlogs.insertOne({
         question,
@@ -212,7 +198,7 @@ app.post("/api/agent", async (req, res) => {
         createdAt: new Date(),
       });
     } catch (e) {
-      console.error("⚠️ Cannot write fundlogs:", e.message);
+      console.error("⚠️ Cannot write fundlogs:", e);
     }
 
     // 5) Trả về client — giữ shape quen thuộc
@@ -227,7 +213,7 @@ app.post("/api/agent", async (req, res) => {
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
   } catch (err) {
-    console.error("❌ /api/agent error:", err?.response?.data || err.message);
+    console.error("❌ /api/agent error:", err);
     return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
@@ -242,7 +228,7 @@ if (!process.env.VERCEL) {
         console.log(`🚀 API running at http://localhost:${PORT}`);
       });
     } catch (e) {
-      console.error("❌ Startup error:", e.message);
+      console.error("❌ Startup error:", e);
       process.exit(1);
     }
   })();
