@@ -2,69 +2,29 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import { MongoClient } from "mongodb";
-import { QdrantClient } from "@qdrant/js-client-rest";
+import { ObjectId } from "mongodb";
 import { pipeline } from "@xenova/transformers";
 import { callLLM } from "./llm.js";
-import { encode } from "gpt-tokenizer"; 
+import { encode } from "gpt-tokenizer";
+import { getDb } from "./db.js";
+import { fundVectorSearch, initEmbedding } from "./search.js";
 
 /* ===================== Env & constants ===================== */
 const PORT = process.env.PORT || 4000;
-
-const MONGO_URI = process.env.MONGO_URI;
-const MONGO_DB = process.env.MONGO_DB || "fitneu";
-const FUNDLOGS_COLLECTION = "fundlogs";
-
-const QDRANT_URL = process.env.QDRANT_URL;
-const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
-const QDRANT_COLLECTION = process.env.QDRANT_COLLECTION || "fund";
-
-const EMBEDDING_MODEL =
-  process.env.EMBEDDING_MODEL || "all-MiniLM-L6-v2";
-
-/* ===================== Basic checks ===================== */
-if (!MONGO_URI) {
-  console.error("❌ Missing MONGO_URI in .env");
-  process.exit(1);
-}
-if (!QDRANT_URL || !QDRANT_API_KEY) {
-  console.error("❌ Missing QDRANT_URL or QDRANT_API_KEY in .env");
-  process.exit(1);
-}
+const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
+const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
+const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "Xenova/paraphrase-multilingual-mpnet-base-v2";
 
 /* ===================== Express ===================== */
 const app = express();
-app.use(cors()); // ✅ Cho phép mọi origin gọi API
+app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
-/* ===================== MongoDB ===================== */
-let mongoClient;
-let db;
-let fundlogs;
-
-async function connectMongo() {
-  if (fundlogs) return; // tránh connect lại nhiều lần trên Vercel
-  mongoClient = new MongoClient(MONGO_URI);
-  await mongoClient.connect();
-  db = mongoClient.db(MONGO_DB);
-  fundlogs = db.collection(FUNDLOGS_COLLECTION);
-  console.log(`✅ MongoDB connected: ${MONGO_DB}.${FUNDLOGS_COLLECTION}`);
-}
-
-/* ===================== Qdrant ===================== */
-console.log("🔧 Using Qdrant URL:", QDRANT_URL);
-const qdrant = new QdrantClient({
-  url: QDRANT_URL,
-  apiKey: QDRANT_API_KEY,
-});
-
-/* ===================== Embeddings (Xenova) ===================== */
+/* ===================== Embeddings (lazy for health info) ===================== */
 let embedder = null;
 async function getEmbedder() {
   if (!embedder) {
-    const modelName = EMBEDDING_MODEL.startsWith("Xenova/")
-      ? EMBEDDING_MODEL
-      : `Xenova/${EMBEDDING_MODEL}`;
+    const modelName = EMBEDDING_MODEL.startsWith("Xenova/") ? EMBEDDING_MODEL : `Xenova/${EMBEDDING_MODEL}`;
     console.log(`🔗 Loading embedding model (${modelName})...`);
     embedder = await pipeline("feature-extraction", modelName);
     console.log("✅ Embedding model loaded");
@@ -79,32 +39,16 @@ async function embedText(text) {
 
 /* ===================== Helpers ===================== */
 const pick = (v) => v ?? "";
-function stringifyArray(v) {
-  if (Array.isArray(v)) return v.filter(Boolean).join(", ");
-  return typeof v === "string" ? v : "";
-}
+const sArr = (v) => (Array.isArray(v) ? v.filter(Boolean).join(", ") : (typeof v === "string" ? v : ""));
 
-// Rút gọn payload fund thành đoạn văn gọn để feed LLM
 function summarizeFundPayload(p = {}) {
-  const title =
-    pick(p["OPPORTUNITY TITLE"]) || pick(p.title) || pick(p.name) || "Không có tiêu đề";
-
-  const agency =
-    pick(p["AGENCY NAME"]) || pick(p.agency) || pick(p.organization) || "";
-
-  const category =
-    pick(p["FUNDING CATEGORY EXPLANATION"]) || pick(p.category) || pick(p.categories) || "";
-
-  const assist =
-    stringifyArray(p["ASSISTANCE LISTINGS"]) || stringifyArray(p.assistance_listings) || "";
-
-  const eligible =
-    stringifyArray(p["ELIGIBLE APPLICANTS"]) || stringifyArray(p.eligible) || "";
-
-  const desc =
-    pick(p["FUNDING DESCRIPTION"]) || pick(p.description) || pick(p.summary) || "";
-
-  const url = pick(p.url) || pick(p.link) || pick(p["OPPORTUNITY URL"]) || "";
+  const title = pick(p["OPPORTUNITY TITLE"]) || pick(p.title) || "Không có tiêu đề";
+  const agency = pick(p["AGENCY NAME"]) || pick(p["AGENCY CODE"]) || "";
+  const category = pick(p["CATEGORY OF FUNDING ACTIVITY"]) || pick(p["FUNDING CATEGORY EXPLANATION"]) || "";
+  const assist = sArr(p["ASSISTANCE LISTINGS"]);
+  const eligible = sArr(p["ELIGIBLE APPLICANTS"]);
+  const desc = pick(p["SYNOPSIS"]) || pick(p["SYNOPSIS DESCRIPTION"]) || pick(p["FUNDING DESCRIPTION"]) || "";
+  const url = pick(p["OPPORTUNITY URL"]) || pick(p["LINK TO ADDITIONAL INFORMATION"]) || "";
 
   let lines = [`• ${title}`];
   if (agency) lines.push(`  - Cơ quan: ${agency}`);
@@ -116,19 +60,12 @@ function summarizeFundPayload(p = {}) {
   return lines.join("\n");
 }
 
-// Build prompt cho LLM
 function buildPrompt(question, hits = []) {
-  const header =
-    "Bạn là trợ lý hỗ trợ tìm kiếm quỹ tài trợ. Dựa trên danh sách cơ hội bên dưới, hãy trả lời ngắn gọn, đưa ra 3–5 cơ hội phù hợp nhất, kèm lý do khớp và lưu ý về eligibility.\n";
+  const header = "Bạn là trợ lý hỗ trợ tìm kiếm quỹ tài trợ. Dựa trên danh sách cơ hội bên dưới, hãy trả lời ngắn gọn, đưa ra 3–5 cơ hội phù hợp nhất, kèm lý do khớp và lưu ý về eligibility.\n";
   const ctx =
     hits.length > 0
       ? hits
-          .map(
-            (h, i) =>
-              `Kết quả #${i + 1} (score=${h.score?.toFixed?.(4) ?? h.score}):\n${summarizeFundPayload(
-                h.payload
-              )}`
-          )
+          .map((h, i) => `Kết quả #${i + 1} (score=${(h.score ?? 0).toFixed?.(4) || h.score}):\n${summarizeFundPayload(h)}`)
           .join("\n\n")
       : "Không tìm thấy kết quả nào trong cơ sở dữ liệu.";
 
@@ -137,88 +74,83 @@ function buildPrompt(question, hits = []) {
 
 /* ===================== Routes ===================== */
 app.get("/api/health", async (_req, res) => {
-  await connectMongo();
-  res.json({
-    status: "ok",
-    mongo_db: MONGO_DB,
-    qdrant_url: QDRANT_URL,
-    collection: QDRANT_COLLECTION,
-    embedding_model: EMBEDDING_MODEL,
-    time: new Date().toISOString(),
-  });
+  try {
+    const db = await getDb();
+    await initEmbedding();
+    res.json({
+      status: "ok",
+      db: "connected",
+      collection: MONGO_COLLECTION,
+      embedding_model: EMBEDDING_MODEL,
+      time: new Date().toISOString(),
+      counts: {
+        fund: await db.collection(MONGO_COLLECTION).estimatedDocumentCount(),
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ status: "error", error: e.message });
+  }
 });
 
 /* ===================== Fund APIs ===================== */
 
-// GET /api/fund/:id  → lấy 1 record từ Qdrant
+// GET /api/fund/:id  → lấy 1 record từ MongoDB
 app.get("/api/fund/:id", async (req, res) => {
   try {
+    const db = await getDb();
     const { id } = req.params;
-    if (!id) return res.status(400).json({ error: "Thiếu id" });
-
-    const record = await qdrant.retrieve(QDRANT_COLLECTION, {
-      ids: [id],
-      with_payload: true,
-      with_vector: false,
-    });
-
-    if (!record || record.length === 0) {
-      return res.status(404).json({ error: "Không tìm thấy fund" });
-    }
-
-    return res.json(record[0]);
+    const doc = await db.collection(MONGO_COLLECTION).findOne({ _id: new ObjectId(id) }, { projection: { vector: 0 } });
+    if (!doc) return res.status(404).json({ error: "Không tìm thấy fund" });
+    res.json({ ...doc, _id: String(doc._id) });
   } catch (err) {
     console.error("❌ /api/fund/:id error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// GET /api/fund  → liệt kê danh sách fund (có phân trang + filter q)
+// GET /api/fund  → liệt kê danh sách fund (pagination) hoặc vector search nếu có q
 app.get("/api/fund", async (req, res) => {
   try {
+    const db = await getDb();
+    const col = db.collection(MONGO_COLLECTION);
     const { page = 1, limit = 20, q } = req.query;
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const pageSize = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
+    const skip = (pageNum - 1) * pageSize;
 
-    // Nếu có query q thì tìm theo vector
     if (q && q.trim()) {
+      // Vector search
       const queryVector = await embedText(q);
-      const results = await qdrant.search(QDRANT_COLLECTION, {
-        vector: queryVector,
-        limit: pageSize,
-        with_payload: true,
-        with_vector: false,
-      });
-
+      const pipelineAgg = [
+        {
+          $vectorSearch: {
+            index: process.env.VECTOR_INDEX_FUND || "vector_index_fund",
+            path: "vector",
+            queryVector,
+            numCandidates: 200,
+            limit: pageSize,
+            similarity: "cosine",
+          },
+        },
+        { $project: { vector: 0, score: { $meta: "vectorSearchScore" } } },
+      ];
+      const items = await col.aggregate(pipelineAgg).toArray();
       return res.json({
-        page: pageNum,
+        page: 1,
         limit: pageSize,
-        total: results.length,
-        items: results.map(r => ({
-          id: r.id,
-          score: r.score,
-          payload: r.payload,
-        })),
+        total: items.length,
+        items: items.map(d => ({ ...d, _id: String(d._id) })),
       });
     }
 
-    // Nếu không có query thì scan toàn bộ (theo offset)
-    const offset = (pageNum - 1) * pageSize;
-    const resQdrant = await qdrant.scroll(QDRANT_COLLECTION, {
-      limit: pageSize,
-      offset,
-      with_payload: true,
-      with_vector: false,
-    });
-
-    return res.json({
+    // Listing thường
+    const cursor = col.find({}, { projection: { vector: 0 } }).sort({ "POSTED DATE": -1 }).skip(skip).limit(pageSize);
+    const [items, total] = await Promise.all([cursor.toArray(), col.estimatedDocumentCount()]);
+    res.json({
       page: pageNum,
       limit: pageSize,
-      next_page_offset: resQdrant.next_page_offset || null,
-      items: (resQdrant.points || []).map(p => ({
-        id: p.id,
-        payload: p.payload,
-      })),
+      total,
+      items: items.map(d => ({ ...d, _id: String(d._id) })),
     });
   } catch (err) {
     console.error("❌ /api/fund error:", err.message);
@@ -226,63 +158,44 @@ app.get("/api/fund", async (req, res) => {
   }
 });
 
-/* ===================== Agent API (chuẩn backend cho worker) ===================== */
+/* ===================== Agent API ===================== */
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
   try {
-    await connectMongo();
+    const db = await getDb();
+    const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
     const { question, model_id = "qwen-max", topk = 5 } = req.body || {};
-    if (!question?.trim()) {
-      return res.status(400).json({ error: "Missing 'question'" });
-    }
+    if (!question?.trim()) return res.status(400).json({ error: "Missing 'question'" });
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
 
-    // 1) Embed & search Qdrant (fund collection)
-    const queryVector = await embedText(question);
-    const results = await qdrant.search(QDRANT_COLLECTION, {
-      vector: queryVector,
-      limit: k,
-      with_payload: true,
-      with_vector: false,
-    });
+    // 1) Vector search trong MongoDB
+    const hits = await fundVectorSearch(question, k);
 
-    const hits = (results || []).map(r => ({
-      id: r.id,
-      score: r.score,
-      payload: r.payload || {},
-    }));
-
-    // 2) Gọi LLM với prompt đã chuẩn hoá cho fund
+    // 2) Gọi LLM
     const prompt = buildPrompt(question, hits);
     const llmRes = await callLLM(prompt, model_id);
 
-    // Chuẩn hoá output từ callLLM (chấp nhận cả kiểu string hoặc object tuỳ provider)
     let text = "";
     let provider = null;
     let resolvedModel = model_id;
-
-    if (typeof llmRes === "string") {
-      text = llmRes;
-    } else if (llmRes && typeof llmRes === "object") {
+    if (typeof llmRes === "string") text = llmRes;
+    else if (llmRes && typeof llmRes === "object") {
       text = llmRes.answer ?? llmRes.text ?? llmRes.content ?? "";
       provider = llmRes.provider ?? null;
       resolvedModel = llmRes.model ?? resolvedModel;
     }
 
-    // 3) Meta (thống kê token, thời gian)
-    let prompt_tokens = null;
-    let answer_tokens = null;
-    let tokens_used = null;
+    // 3) Meta
+    let prompt_tokens = null, answer_tokens = null, tokens_used = null;
     try {
       prompt_tokens = encode(prompt).length;
       answer_tokens = encode(text).length;
       tokens_used = prompt_tokens + answer_tokens;
     } catch (_) {}
-
     const response_time_ms = Date.now() - startedAt;
 
-    // 4) Ghi log (không phá vỡ logic cũ)
+    // 4) Ghi log
     try {
       await fundlogs.insertOne({
         question,
@@ -296,53 +209,35 @@ app.post("/api/agent", async (req, res) => {
         topk: k,
         hits: hits.slice(0, 5),
         meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
+        createdAt: new Date(),
       });
     } catch (e) {
-      console.error("⚠️ Cannot write fundlogs (/api/agent):", e.message);
+      console.error("⚠️ Cannot write fundlogs:", e.message);
     }
 
-    // 5) Trả về đúng shape mà Cloudflare worker đang dùng
+    // 5) Trả về client — giữ shape quen thuộc
     return res.json({
       model_id,
       answer: {
-        answer: text,          // worker đọc: data.answer.answer
-        model: resolvedModel,  // worker đọc: data.answer.model
+        answer: text,
+        model: resolvedModel,
         provider,
       },
       retrieved: { fund: hits },
-      meta: {
-        response_time_ms,
-        tokens_used,
-        prompt_tokens,
-        answer_tokens,
-      },
+      meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
   } catch (err) {
     console.error("❌ /api/agent error:", err?.response?.data || err.message);
-    try {
-      await fundlogs.insertOne({
-        question: req.body?.question || null,
-        asked_at: new Date(startedAt),
-        error: err.message || String(err),
-        withLLM: true,
-        model_id: req.body?.model_id || "qwen-max",
-        route: "/api/agent",
-      });
-    } catch (_) {}
-    return res.status(500).json({
-      error: err.message || "Internal error",
-      detail: err?.response?.data,
-    });
+    return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
 
 /* ===================== Boot ===================== */
-if (process.env.NODE_ENV !== "production") {
-  // Local: chạy express server
+if (!process.env.VERCEL) {
   (async () => {
     try {
-      await connectMongo();
-      await getEmbedder();
+      await getDb();
+      await initEmbedding();
       app.listen(PORT, () => {
         console.log(`🚀 API running at http://localhost:${PORT}`);
       });
@@ -353,5 +248,4 @@ if (process.env.NODE_ENV !== "production") {
   })();
 }
 
-// ✅ Export cho Vercel
 export default app;
