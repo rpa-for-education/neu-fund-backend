@@ -20,23 +20,35 @@ app.use(express.json({ limit: "10mb" }));
 
 /* ===================== Helpers ===================== */
 const pick = (v) => v ?? "";
-const sArr = (v) => (Array.isArray(v) ? v.filter(Boolean).join(", ") : (typeof v === "string" ? v : ""));
+const sArr = (v) =>
+  Array.isArray(v) ? v.filter(Boolean).join(", ") : typeof v === "string" ? v : "";
 
 function summarizeFundPayload(p = {}) {
   const title = pick(p["OPPORTUNITY TITLE"]) || pick(p.title) || "Không có tiêu đề";
   const agency = pick(p["AGENCY NAME"]) || pick(p["AGENCY CODE"]) || "";
-  const category = pick(p["CATEGORY OF FUNDING ACTIVITY"]) || pick(p["FUNDING CATEGORY EXPLANATION"]) || "";
+  const category =
+    pick(p["CATEGORY OF FUNDING ACTIVITY"]) ||
+    pick(p["FUNDING CATEGORY EXPLANATION"]) ||
+    "";
   const assist = sArr(p["ASSISTANCE LISTINGS"]);
   const eligible = sArr(p["ELIGIBLE APPLICANTS"]);
-  const desc = pick(p["SYNOPSIS"]) || pick(p["SYNOPSIS DESCRIPTION"]) || pick(p["FUNDING DESCRIPTION"]) || "";
-  const url = pick(p["OPPORTUNITY URL"]) || pick(p["LINK TO ADDITIONAL INFORMATION"]) || "";
+  const desc =
+    pick(p["SYNOPSIS"]) ||
+    pick(p["SYNOPSIS DESCRIPTION"]) ||
+    pick(p["FUNDING DESCRIPTION"]) ||
+    "";
+  const url =
+    pick(p["OPPORTUNITY URL"]) || pick(p["LINK TO ADDITIONAL INFORMATION"]) || "";
 
   let lines = [`• ${title}`];
   if (agency) lines.push(`  - Cơ quan: ${agency}`);
   if (category) lines.push(`  - Nhóm: ${category}`);
   if (assist) lines.push(`  - Assistance: ${assist}`);
   if (eligible) lines.push(`  - Đối tượng: ${eligible}`);
-  if (desc) lines.push(`  - Mô tả: ${desc.slice(0, 400)}${desc.length > 400 ? "..." : ""}`);
+  if (desc)
+    lines.push(
+      `  - Mô tả: ${desc.slice(0, 400)}${desc.length > 400 ? "..." : ""}`
+    );
   if (url) lines.push(`  - Link: ${url}`);
   return lines.join("\n");
 }
@@ -47,7 +59,12 @@ function buildPrompt(question, hits = []) {
   const ctx =
     hits.length > 0
       ? hits
-          .map((h, i) => `Kết quả #${i + 1} (score=${(h.score ?? 0).toFixed?.(4) || h.score}):\n${summarizeFundPayload(h)}`)
+          .map(
+            (h, i) =>
+              `Kết quả #${i + 1} (score=${
+                (h.score ?? 0).toFixed?.(4) || h.score
+              }):\n${summarizeFundPayload(h)}`
+          )
           .join("\n\n")
       : "Không tìm thấy kết quả nào trong cơ sở dữ liệu.";
 
@@ -79,7 +96,6 @@ async function Funds() {
 app.get("/api/health", async (_req, res) => {
   try {
     const db = await getDb();
-    // đảm bảo embedder được khởi tạo sớm (giảm cold start trên dev)
     await initEmbedding().catch((e) => {
       console.warn("⚠️ initEmbedding warning:", e?.message || e);
     });
@@ -109,7 +125,6 @@ app.get("/api/funds", async (req, res) => {
       "OPPORTUNITY TITLE",
       "AGENCY NAME",
       "AGENCY CODE",
-      "OPPORTUNITY NUMBER",
       "ASSISTANCE LISTINGS",
       "GRANTOR CONTACT",
       "GRANTOR CONTACT EMAIL",
@@ -134,10 +149,15 @@ app.get("/api/funds", async (req, res) => {
       ]);
     }
 
+    // Ẩn các trường không muốn hiển thị
+    items = items.map(({ VECTOR, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest);
+
     res.json({ page, limit: limit || total, total, items });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to fetch funds", detail: err.message });
+    res
+      .status(500)
+      .json({ error: "Failed to fetch funds", detail: err.message });
   }
 });
 
@@ -149,12 +169,14 @@ app.post("/api/agent", async (req, res) => {
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
     const { question, model_id = "qwen-max", topk = 5 } = req.body || {};
-    if (!question?.trim()) return res.status(400).json({ error: "Missing 'question'" });
+    if (!question?.trim())
+      return res.status(400).json({ error: "Missing 'question'" });
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
 
     let hits = [];
     try {
       hits = await fundVectorSearch(question, k);
+      hits = hits.map(({ VECTOR, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest); // Ẩn luôn ở đây
     } catch (e) {
       console.error("⚠️ fundVectorSearch failed:", e);
       hits = [];
