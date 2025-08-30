@@ -80,63 +80,57 @@ app.get("/api/health", async (_req, res) => {
 
 /* ===================== Fund APIs ===================== */
 
-// GET /api/fund/:id  → lấy 1 record từ MongoDB
-app.get("/api/fund/:id", async (req, res) => {
+app.get("/api/funds", async (req, res) => {
   try {
-    const db = await getDb();
-    const { id } = req.params;
-    if (!id) return res.status(400).json({ error: "Thiếu id" });
-    const doc = await db.collection(MONGO_COLLECTION).findOne({ _id: new ObjectId(id) }, { projection: { vector: 0 } });
-    if (!doc) return res.status(404).json({ error: "Không tìm thấy fund" });
-    return res.json({ ...doc, _id: String(doc._id) });
-  } catch (err) {
-    console.error("❌ /api/fund/:id error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
+    const { q } = req.query;
+    const { limit, skip, page } = getPagination(req);
 
-// GET /api/fund  → liệt kê danh sách fund (pagination) hoặc vector search nếu có q
-app.get("/api/fund", async (req, res) => {
-  try {
-    const db = await getDb();
-    const col = db.collection(MONGO_COLLECTION);
-    const { page = 1, limit = 20, q } = req.query;
-    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const pageSize = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
-    const skip = (pageNum - 1) * pageSize;
+    // các trường sẽ cho phép search
+    const filter = buildSearchFilter(q, [
+      "OPPORTUNITY_TITLE",
+      "AGENCY_NAME",
+      "AGENCY_CODE",
+      "OPPORTUNITY_NUMBER",
+      "ASSISTANCE_LISTINGS",
+      "GRANTOR_CONTACT",
+      "GRANTOR_CONTACT_EMAIL",
+      "FUNDING_DESCRIPTION",
+      "ELIGIBLE_APPLICANTS",
+      "OPPORTUNITY_ID",
+      "OPPORTUNITY_URL",
+      "_key"
+    ]);
 
-    if (q && q.trim()) {
-      // DÙNG fundVectorSearch từ search.js (an toàn, dùng cùng embedder và index)
-      try {
-        const hits = await fundVectorSearch(q, pageSize);
-        // fundVectorSearch đã loại vector ra trong projection
-        return res.json({
-          page: 1,
-          limit: pageSize,
-          total: hits.length,
-          items: hits.map(d => ({ ...d, _id: String(d._id) })),
-        });
-      } catch (err) {
-        console.error("❌ Vector search error:", err);
-        // nếu vector search lỗi, trả về 500 với message rõ
-        return res.status(500).json({ error: "Vector search failed", detail: err?.message || err });
-      }
+    const col = await Funds();
+
+    // Query
+    const cursor = col.find(filter).sort({ POSTED_DATE: -1 });
+
+    let items, total;
+    if (!limit) {
+      items = await cursor.toArray();
+      total = items.length;
+    } else {
+      [items, total] = await Promise.all([
+        cursor.skip(skip).limit(limit).toArray(),
+        col.countDocuments(filter)
+      ]);
     }
 
-    // Listing thường (phân trang)
-    const cursor = col.find({}, { projection: { vector: 0 } }).sort({ "POSTED DATE": -1 }).skip(skip).limit(pageSize);
-    const [items, total] = await Promise.all([cursor.toArray(), col.estimatedDocumentCount()]);
-    return res.json({
-      page: pageNum,
-      limit: pageSize,
+    res.json({
+      page,
+      limit: limit || total,
       total,
-      items: items.map(d => ({ ...d, _id: String(d._id) })),
+      items
     });
+
   } catch (err) {
-    console.error("❌ /api/fund error:", err);
-    res.status(500).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch funds", detail: err.message });
   }
 });
+
+
 
 /* ===================== Agent API ===================== */
 app.post("/api/agent", async (req, res) => {
