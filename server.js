@@ -150,7 +150,8 @@ app.get("/api/funds", async (req, res) => {
     }
 
     // Ẩn các trường không muốn hiển thị
-    items = items.map(({ vector, "OPPORTUNITY NUMBER": oppNum, ...rest }) => rest);
+    items = items.map(({ vector, _id, "AGENCY CODE", "FUNDING CATEGORY EXPLANATION", "FUNDING INSTRUMENT TYPE", "ASSISTANCE LISTINGS", "OPPORTUNITY NUMBER", "EXPECTED NUMBER OF AWARDS", "AWARD CEILING", "AWARD FLOOR", "COST SHARING / MATCH REQUIREMENT", "LINK TO ADDITIONAL INFORMATION", "GRANTOR CONTACT", "GRANTOR CONTACT PHONE", "GRANTOR CONTACT EMAIL", "ESTIMATED POST DATE", "ESTIMATED APPLICATION DUE DATE", "LAST UPDATED DATE/TIME", "VERSION", "OPPORTUNITY PACKAGE", "SYNOPSIS ARCHIVED", "u_key", "FUNDING DESCRIPTION", ...rest }) => rest);
+
 
     res.json({ page, limit: limit || total, total, items });
   } catch (err) {
