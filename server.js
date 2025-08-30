@@ -119,7 +119,6 @@ app.get("/api/funds", async (req, res) => {
   try {
     const { q } = req.query;
     const { limit, skip, page } = getPagination(req);
-    const safeLimit = limit || 50; // default 50
 
     const filter = buildSearchFilter(q, [
       "OPPORTUNITY TITLE",
@@ -130,38 +129,48 @@ app.get("/api/funds", async (req, res) => {
     const col = await Funds();
 
     const pipeline = [];
-    if (Object.keys(filter).length) pipeline.push({ $match: filter });
-
+    if (Object.keys(filter).length) {
+      pipeline.push({ $match: filter });
+    }
     pipeline.push({ $sort: { POSTED_DATE: -1 } });
 
-    pipeline.push({
-      $facet: {
-        items: [
-          { $skip: skip },
-          { $limit: safeLimit },
-          {
-            $project: {
-              name: "$OPPORTUNITY TITLE",
-              url: "$OPPORTUNITY URL",
-            },
-          },
-        ],
-        total: [{ $count: "count" }],
-      },
-    });
+    const facet = {
+      items: [],
+      total: [{ $count: "count" }],
+    };
+
+    if (limit > 0) {
+      facet.items.push({ $skip: skip }, { $limit: limit });
+    }
+
+    pipeline.push({ $facet: facet });
 
     const result = await col.aggregate(pipeline, { allowDiskUse: true }).toArray();
-    const { items, total } = result[0];
+    const { items, total } = result[0] || { items: [], total: [] };
     const totalCount = total[0]?.count || 0;
 
-    res.json({ page, limit: safeLimit, total: totalCount, items });
+    // đổi tên 2 trường, các field khác giữ nguyên
+    const mappedItems = items.map((item) => {
+      const { ["OPPORTUNITY TITLE"]: rawTitle, ["OPPORTUNITY URL"]: rawUrl, ...rest } = item;
+      return {
+        ...rest,
+        title: rawTitle,
+        url: rawUrl,
+      };
+    });
+
+    res.json({
+      page,
+      limit: limit || totalCount,
+      total: totalCount,
+      items: mappedItems,
+    });
   } catch (err) {
     console.error(err);
-    res
-      .status(500)
-      .json({ error: "Failed to fetch funds", detail: err.message });
+    res.status(500).json({ error: "Failed to fetch funds", detail: err.message });
   }
 });
+
 
 /* ===================== Agent API ===================== */
 app.post("/api/agent", async (req, res) => {
