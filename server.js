@@ -150,7 +150,7 @@ app.get("/api/funds", async (req, res) => {
     }
 
     // Ẩn các trường không muốn hiển thị
-    items = items.map(({ VECTOR, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest);
+    items = items.map(({["vector"], ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest);
 
     res.json({ page, limit: limit || total, total, items });
   } catch (err) {
