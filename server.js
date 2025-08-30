@@ -128,28 +128,14 @@ app.get("/api/funds", async (req, res) => {
 
     const col = await Funds();
 
-    const pipeline = [];
-    if (Object.keys(filter).length) {
-      pipeline.push({ $match: filter });
-    }
-    pipeline.push({ $sort: { POSTED_DATE: -1 } });
+    const cursor = col.find(filter).sort({ POSTED_DATE: -1 });
 
-    const facet = {
-      items: [],
-      total: [{ $count: "count" }],
-    };
+    const [items, total] = await Promise.all([
+      cursor.skip(skip).limit(limit || 50).toArray(),
+      col.countDocuments(filter),
+    ]);
 
-    if (limit > 0) {
-      facet.items.push({ $skip: skip }, { $limit: limit });
-    }
-
-    pipeline.push({ $facet: facet });
-
-    const result = await col.aggregate(pipeline, { allowDiskUse: true }).toArray();
-    const { items, total } = result[0] || { items: [], total: [] };
-    const totalCount = total[0]?.count || 0;
-
-    // đổi tên 2 trường, các field khác giữ nguyên
+    // đổi tên 2 trường
     const mappedItems = items.map((item) => {
       const { ["OPPORTUNITY TITLE"]: rawTitle, ["OPPORTUNITY URL"]: rawUrl, ...rest } = item;
       return {
@@ -161,16 +147,15 @@ app.get("/api/funds", async (req, res) => {
 
     res.json({
       page,
-      limit: limit || totalCount,
-      total: totalCount,
+      limit: limit || 50,
+      total,
       items: mappedItems,
     });
   } catch (err) {
-    console.error(err);
+    console.error("❌ /api/funds error:", err);
     res.status(500).json({ error: "Failed to fetch funds", detail: err.message });
   }
 });
-
 
 /* ===================== Agent API ===================== */
 app.post("/api/agent", async (req, res) => {
