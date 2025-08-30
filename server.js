@@ -1,3 +1,4 @@
+// server.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -26,28 +27,19 @@ function summarizeFundPayload(p = {}) {
   const title = pick(p["OPPORTUNITY TITLE"]) || pick(p.title) || "Không có tiêu đề";
   const agency = pick(p["AGENCY NAME"]) || pick(p["AGENCY CODE"]) || "";
   const category =
-    pick(p["CATEGORY OF FUNDING ACTIVITY"]) ||
-    pick(p["FUNDING CATEGORY EXPLANATION"]) ||
-    "";
+    pick(p["CATEGORY OF FUNDING ACTIVITY"]) || pick(p["FUNDING CATEGORY EXPLANATION"]) || "";
   const assist = sArr(p["ASSISTANCE LISTINGS"]);
   const eligible = sArr(p["ELIGIBLE APPLICANTS"]);
   const desc =
-    pick(p["SYNOPSIS"]) ||
-    pick(p["SYNOPSIS DESCRIPTION"]) ||
-    pick(p["FUNDING DESCRIPTION"]) ||
-    "";
-  const url =
-    pick(p["OPPORTUNITY URL"]) || pick(p["LINK TO ADDITIONAL INFORMATION"]) || "";
+    pick(p["SYNOPSIS"]) || pick(p["SYNOPSIS DESCRIPTION"]) || pick(p["FUNDING DESCRIPTION"]) || "";
+  const url = pick(p["OPPORTUNITY URL"]) || pick(p["LINK TO ADDITIONAL INFORMATION"]) || "";
 
   let lines = [`• ${title}`];
   if (agency) lines.push(`  - Cơ quan: ${agency}`);
   if (category) lines.push(`  - Nhóm: ${category}`);
   if (assist) lines.push(`  - Assistance: ${assist}`);
   if (eligible) lines.push(`  - Đối tượng: ${eligible}`);
-  if (desc)
-    lines.push(
-      `  - Mô tả: ${desc.slice(0, 400)}${desc.length > 400 ? "..." : ""}`
-    );
+  if (desc) lines.push(`  - Mô tả: ${desc.slice(0, 400)}${desc.length > 400 ? "..." : ""}`);
   if (url) lines.push(`  - Link: ${url}`);
   return lines.join("\n");
 }
@@ -60,13 +52,12 @@ function buildPrompt(question, hits = []) {
       ? hits
           .map(
             (h, i) =>
-              `Kết quả #${i + 1} (score=${
-                (h.score ?? 0).toFixed?.(4) || h.score
-              }):\n${summarizeFundPayload(h)}`
+              `Kết quả #${i + 1} (score=${(h.score ?? 0).toFixed?.(4) || h.score}):\n${summarizeFundPayload(
+                h
+              )}`
           )
           .join("\n\n")
       : "Không tìm thấy kết quả nào trong cơ sở dữ liệu.";
-
   return `${header}\nCâu hỏi người dùng: "${question}"\n\nNgữ cảnh:\n${ctx}\n\nYêu cầu: Trả lời bằng TIẾNG VIỆT, liệt kê gọn, có tiêu đề từng cơ hội, nêu lý do phù hợp (theo chủ đề/đối tượng/quốc gia), thêm link nếu có.`;
 }
 
@@ -81,9 +72,7 @@ function getPagination(req) {
 function buildSearchFilter(q, fields = []) {
   if (!q) return {};
   const regex = { $regex: q, $options: "i" };
-  return {
-    $or: fields.map((field) => ({ [field]: regex })),
-  };
+  return { $or: fields.map((field) => ({ [field]: regex })) };
 }
 
 async function Funds() {
@@ -119,38 +108,50 @@ app.get("/api/funds", async (req, res) => {
   try {
     const { q } = req.query;
     const { limit, skip, page } = getPagination(req);
-
     const filter = buildSearchFilter(q, [
       "OPPORTUNITY TITLE",
       "OPPORTUNITY URL",
       "_key",
     ]);
-
     const col = await Funds();
 
-    const cursor = col.find(filter).sort({ POSTED_DATE: -1 });
+    if (!limit) {
+      // Stream toàn bộ dữ liệu để tránh vượt BSON 16MB
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      const cursor = col.find(filter).sort({ POSTED_DATE: -1 });
+      let first = true;
+      let total = 0;
 
-    const [items, total] = await Promise.all([
-      cursor.skip(skip).limit(limit || 50).toArray(),
-      col.countDocuments(filter),
-    ]);
+      res.write(`{"page":1,"limit":0,"total":`);
+      const allDocs = await col.countDocuments(filter);
+      res.write(`${allDocs},"items":[`);
 
-    // đổi tên 2 trường
-    const mappedItems = items.map((item) => {
-      const { ["OPPORTUNITY TITLE"]: rawTitle, ["OPPORTUNITY URL"]: rawUrl, ...rest } = item;
-      return {
-        ...rest,
-        title: rawTitle,
-        url: rawUrl,
-      };
-    });
+      await cursor.forEach((item) => {
+        const { ["OPPORTUNITY TITLE"]: rawTitle, ["OPPORTUNITY URL"]: rawUrl, ...rest } = item;
+        const mapped = { ...rest, title: rawTitle, url: rawUrl };
+        if (!first) res.write(",");
+        res.write(JSON.stringify(mapped));
+        first = false;
+        total++;
+      });
 
-    res.json({
-      page,
-      limit: limit || 50,
-      total,
-      items: mappedItems,
-    });
+      res.write("]}");
+      res.end();
+    } else {
+      // Phân trang bình thường
+      const cursor = col.find(filter).sort({ POSTED_DATE: -1 });
+      const [items, total] = await Promise.all([
+        cursor.skip(skip).limit(limit).toArray(),
+        col.countDocuments(filter),
+      ]);
+
+      const mappedItems = items.map((item) => {
+        const { ["OPPORTUNITY TITLE"]: rawTitle, ["OPPORTUNITY URL"]: rawUrl, ...rest } = item;
+        return { ...rest, title: rawTitle, url: rawUrl };
+      });
+
+      res.json({ page, limit, total, items: mappedItems });
+    }
   } catch (err) {
     console.error("❌ /api/funds error:", err);
     res.status(500).json({ error: "Failed to fetch funds", detail: err.message });
@@ -163,16 +164,15 @@ app.post("/api/agent", async (req, res) => {
   try {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
-
     const { question, model_id = "qwen-max", topk = 5 } = req.body || {};
-    if (!question?.trim())
-      return res.status(400).json({ error: "Missing 'question'" });
-    const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
 
+    if (!question?.trim()) return res.status(400).json({ error: "Missing 'question'" });
+
+    const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
     try {
       hits = await fundVectorSearch(question, k);
-      hits = hits.map(({ VECTOR, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest);
+      hits = hits.map(({ VECTOR, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest); // bỏ VECTOR + OPPORTUNITY NUMBER
     } catch (e) {
       console.error("⚠️ fundVectorSearch failed:", e);
       hits = [];
@@ -199,6 +199,7 @@ app.post("/api/agent", async (req, res) => {
       answer_tokens = encode(text).length;
       tokens_used = prompt_tokens + answer_tokens;
     } catch (_) {}
+
     const response_time_ms = Date.now() - startedAt;
 
     try {
