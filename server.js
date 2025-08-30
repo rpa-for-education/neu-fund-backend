@@ -150,8 +150,32 @@ app.get("/api/funds", async (req, res) => {
     }
 
     // Ẩn các trường không muốn hiển thị
-    items = items.map(({ vector, _id, "AGENCY CODE", "FUNDING CATEGORY EXPLANATION", "FUNDING INSTRUMENT TYPE", "ASSISTANCE LISTINGS", "OPPORTUNITY NUMBER", "EXPECTED NUMBER OF AWARDS", "AWARD CEILING", "AWARD FLOOR", "COST SHARING / MATCH REQUIREMENT", "LINK TO ADDITIONAL INFORMATION", "GRANTOR CONTACT", "GRANTOR CONTACT PHONE", "GRANTOR CONTACT EMAIL", "ESTIMATED POST DATE", "ESTIMATED APPLICATION DUE DATE", "LAST UPDATED DATE/TIME", "VERSION", "OPPORTUNITY PACKAGE", "SYNOPSIS ARCHIVED", "u_key", "FUNDING DESCRIPTION", ...rest }) => rest);
-
+    items = items.map(({
+      vector,
+      _id,
+      "AGENCY CODE": agencyCode,
+      "FUNDING CATEGORY EXPLANATION": fundingCategoryExplanation,
+      "FUNDING INSTRUMENT TYPE": fundingInstrumentType,
+      "ASSISTANCE LISTINGS": assistanceListings,
+      "OPPORTUNITY NUMBER": opportunityNumber,
+      "EXPECTED NUMBER OF AWARDS": expectedAwards,
+      "AWARD CEILING": awardCeiling,
+      "AWARD FLOOR": awardFloor,
+      "COST SHARING / MATCH REQUIREMENT": costSharing,
+      "LINK TO ADDITIONAL INFORMATION": linkInfo,
+      "GRANTOR CONTACT": grantorContact,
+      "GRANTOR CONTACT PHONE": grantorPhone,
+      "GRANTOR CONTACT EMAIL": grantorEmail,
+      "ESTIMATED POST DATE": estimatedPostDate,
+      "ESTIMATED APPLICATION DUE DATE": estimatedDueDate,
+      "LAST UPDATED DATE/TIME": lastUpdated,
+      "VERSION": version,
+      "OPPORTUNITY PACKAGE": oppPackage,
+      "SYNOPSIS ARCHIVED": synopsisArchived,
+      "u_key": uKey,
+      "FUNDING DESCRIPTION": fundingDescription,
+      ...rest
+  }) => rest);
 
     res.json({ page, limit: limit || total, total, items });
   } catch (err) {
