@@ -112,22 +112,24 @@ app.post("/api/agent", async (req, res) => {
   try {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
-    const { question, model_id = "qwen-max", topk = 5 } = req.body || {};
-    if (!question?.trim()) return res.status(400).json({ error: "Missing 'question'" });
+
+    // Hỗ trợ cả question và prompt
+    const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
+    const question = rawQuestion || prompt;
+    if (!question?.trim()) return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
 
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
-    // Thay đoạn này trong /api/agent
     try {
       hits = await fundVectorSearch(question, k);
-      hits = hits.map(({ vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest);
+      hits = hits.map(({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest);
     } catch (e) {
       console.error("⚠️ fundVectorSearch failed:", e);
       hits = [];
     }
 
-    const prompt = "..."; // (giữ nguyên logic buildPrompt của bạn, mình rút gọn ở đây)
-    const llmRes = await callLLM(prompt, model_id);
+    const promptText = "..."; // giữ nguyên logic buildPrompt gốc
+    const llmRes = await callLLM(promptText, model_id);
 
     let text = "";
     let provider = null;
@@ -141,7 +143,7 @@ app.post("/api/agent", async (req, res) => {
 
     let prompt_tokens = null, answer_tokens = null, tokens_used = null;
     try {
-      prompt_tokens = encode(prompt).length;
+      prompt_tokens = encode(promptText).length;
       answer_tokens = encode(text).length;
       tokens_used = prompt_tokens + answer_tokens;
     } catch (_) {}
