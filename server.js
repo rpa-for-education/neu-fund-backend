@@ -69,7 +69,7 @@ app.get("/api/funds", async (req, res) => {
 
       const total = await col.countDocuments(filter);
       let first = true;
-      res.write(`{"page":1,"limit":0,"total":${total},"items":[`);
+      res.write(`{"page":1,"limit":100,"total":${total},"items":[`);
 
       await cursor.forEach((doc) => {
         const mapped = { name: doc["OPPORTUNITY TITLE"], url: doc["OPPORTUNITY URL"] };
