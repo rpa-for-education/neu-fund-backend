@@ -12,6 +12,7 @@ import { fundVectorSearch, initEmbedding } from "./search.js";
 const PORT = process.env.PORT || 4000;
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
+const DEFAULT_LIMIT = 100; // 👈 số bản ghi mặc định
 
 /* ===================== Express ===================== */
 const app = express();
@@ -61,15 +62,16 @@ app.get("/api/funds", async (req, res) => {
     const col = await Funds();
 
     if (!limit) {
-      // Stream toàn bộ {name, url}
+      // Stream toàn bộ {name, url} nhưng có giới hạn DEFAULT_LIMIT
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       const cursor = col
         .find(filter, { projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 } })
-        .sort({ POSTED_DATE: -1 });
+        .sort({ POSTED_DATE: -1 })
+        .limit(DEFAULT_LIMIT); // 👈 giới hạn số bản ghi
 
       const total = await col.countDocuments(filter);
       let first = true;
-      res.write(`{"page":1,"limit":100,"total":${total},"items":[`);
+      res.write(`{"page":1,"limit":${DEFAULT_LIMIT},"total":${total},"items":[`);
 
       await cursor.forEach((doc) => {
         const mapped = { name: doc["OPPORTUNITY TITLE"], url: doc["OPPORTUNITY URL"] };
@@ -81,7 +83,7 @@ app.get("/api/funds", async (req, res) => {
       res.write("]}");
       res.end();
     } else {
-      // Phân trang
+      // Phân trang theo limit do client truyền
       const cursor = col
         .find(filter, { projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 } })
         .sort({ POSTED_DATE: -1 });
