@@ -117,9 +117,10 @@ app.post("/api/agent", async (req, res) => {
 
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
+    // Thay đoạn này trong /api/agent
     try {
       hits = await fundVectorSearch(question, k);
-      hits = hits.map(({ VECTOR, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest);
+      hits = hits.map(({ vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest);
     } catch (e) {
       console.error("⚠️ fundVectorSearch failed:", e);
       hits = [];

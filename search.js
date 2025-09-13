@@ -4,7 +4,8 @@ import { getDb } from "./db.js";
 
 const MAX_TOPK = parseInt(process.env.MAX_TOPK || "30", 10);
 const VECTOR_INDEX_NAME = process.env.VECTOR_INDEX_FUND || "vector_index_fund";
-const VECTOR_PATH = process.env.VECTOR_PATH || "vector"; // linh hoạt hơn
+const VECTOR_PATH = process.env.VECTOR_PATH || "vector";
+
 
 let embedder = null;
 
