@@ -128,7 +128,26 @@ app.post("/api/agent", async (req, res) => {
       hits = [];
     }
 
-    const promptText = "..."; // giữ nguyên logic buildPrompt gốc
+    // 👉 Ghép dữ liệu retrieved vào prompt cho LLM
+    const contextText = hits
+      .map(
+        (f, i) =>
+          `${i + 1}. ${f["OPPORTUNITY TITLE"] || ""} - ${f["AGENCY NAME"] || ""} - ${
+            f["OPPORTUNITY URL"] || ""
+          }`
+      )
+      .join("\n");
+
+    const promptText = `
+Người dùng hỏi: "${question}"
+
+Dưới đây là danh sách quỹ có liên quan:
+${contextText}
+
+Hãy trả lời bằng tiếng Việt, liệt kê rõ tên quỹ, cơ quan cấp và đường dẫn. 
+Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy quỹ phù hợp".
+    `;
+
     const llmRes = await callLLM(promptText, model_id);
 
     let text = "";
@@ -141,7 +160,9 @@ app.post("/api/agent", async (req, res) => {
       resolvedModel = llmRes.model ?? resolvedModel;
     }
 
-    let prompt_tokens = null, answer_tokens = null, tokens_used = null;
+    let prompt_tokens = null,
+      answer_tokens = null,
+      tokens_used = null;
     try {
       prompt_tokens = encode(promptText).length;
       answer_tokens = encode(text).length;
