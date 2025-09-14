@@ -13,7 +13,7 @@ import { addToMemory, getMemory } from "./memory.js"; // <-- short-term memory
 const PORT = process.env.PORT || 4000;
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
-const DEFAULT_LIMIT_FUND = 100; // 👈 số bản ghi Fund mặc định
+const DEFAULT_LIMIT_FUND = 100; 
 const DEFAULT_SHORT_MEMORY_SIZE = parseInt(process.env.SHORT_MEMORY_SIZE || "5", 10);
 
 /* ===================== Express ===================== */
@@ -64,7 +64,6 @@ app.get("/api/funds", async (req, res) => {
     const col = await Funds();
 
     if (!limit) {
-      // Stream toàn bộ {name, url} với DEFAULT_LIMIT_FUND
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       const cursor = col
         .find(filter, { projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 } })
@@ -85,7 +84,6 @@ app.get("/api/funds", async (req, res) => {
       res.write("]}");
       res.end();
     } else {
-      // Phân trang
       const cursor = col
         .find(filter, { projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 } })
         .sort({ POSTED_DATE: -1 });
@@ -116,9 +114,9 @@ app.post("/api/agent", async (req, res) => {
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
     // Ưu tiên lấy sid từ query ?sid=...
-    let { sid } = req.query;
+    let sid = req.query.sid;
     if (!sid) {
-      sid = new ObjectId().toString(); // khởi tạo mới nếu chưa có
+      sid = new ObjectId().toString(); // nếu không có thì tạo mới
     }
 
     // Lấy question
@@ -145,7 +143,6 @@ app.post("/api/agent", async (req, res) => {
       memoryEntries = [];
     }
 
-    // Ghép context
     const contextText = hits
       .map(
         (f, i) =>
