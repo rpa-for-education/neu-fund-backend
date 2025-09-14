@@ -1,4 +1,3 @@
-// --- file: server.js ---
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -133,15 +132,17 @@ app.post("/api/agent", async (req, res) => {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
-    // 👇 chỉ lấy sid từ query/body, không dùng cookie
+    // ---- SESSIONID logic bắt đầu ----
     let sid = req.query.sid || (req.body && req.body.sid) || null;
+    let isNewSession = false;
     if (!sid) {
       sid = new ObjectId().toString();
+      isNewSession = true;
     }
+    sid = String(sid);
+    // ---- SESSIONID logic kết thúc ----
 
-    console.log(`[agent] using sid=${sid}`);
-
-    // Lấy question
+    // Đoạn dưới giữ nguyên như cũ
     const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } =
       req.body || {};
     const question = rawQuestion || prompt;
@@ -245,8 +246,10 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       console.warn("⚠️ addToMemory failed:", e);
     }
 
+    // Trả sessionId + flag phiên mới cho client
     return res.json({
       sessionId: sid,
+      isNewSession,
       model_id,
       answer: { answer: text, model: resolvedModel, provider },
       retrieved: { fund: hits },
