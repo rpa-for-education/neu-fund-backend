@@ -128,10 +128,18 @@ function extractSidFromUrl(maybeUrl) {
   }
 }
 
+// lấy base domain heuristic (ví dụ: "research.neu.edu.vn" -> ".neu.edu.vn")
+function baseDomainFromHost(hostname) {
+  if (!hostname) return null;
+  const parts = hostname.split(".").filter(Boolean);
+  if (parts.length <= 2) return hostname; // e.g. localhost or domain.tld
+  return "." + parts.slice(-2).join(".");
+}
+
 /* ===================== Session endpoint to establish canonical sessionId ====
    Call this from frontend on page load. It will:
      - check query.sid, cookie, referer
-     - if no sid found, create one and set cookie
+     - if no sid found, create one and set cookie (with domain guessed from referer)
    Returns { sessionId, source } and sets cookie 'sid'
    ============================================================================ */
 app.get("/api/session", async (req, res) => {
@@ -150,10 +158,12 @@ app.get("/api/session", async (req, res) => {
       sidSource = "generated";
     }
 
-    // cookie options - adjust secure/sameSite in production as needed
+    // determine cookie domain from referer if possible to allow subdomain sharing
+    const cookieDomain = referer ? baseDomainFromHost(new URL(referer).hostname) : null;
+
     const cookieOptions = (process.env.NODE_ENV === "production")
-      ? { httpOnly: false, sameSite: "none", secure: true, maxAge: 30 * 24 * 60 * 60 * 1000 }
-      : { httpOnly: false, sameSite: "lax", secure: false, maxAge: 30 * 24 * 60 * 60 * 1000 };
+      ? { httpOnly: false, sameSite: "none", secure: true, domain: cookieDomain || undefined, maxAge: 30 * 24 * 60 * 60 * 1000 }
+      : { httpOnly: false, sameSite: "lax", secure: false, domain: cookieDomain || undefined, maxAge: 30 * 24 * 60 * 60 * 1000 };
 
     try {
       if (!req.cookies || req.cookies.sid !== sid) {
@@ -163,7 +173,7 @@ app.get("/api/session", async (req, res) => {
       console.warn("⚠️ Cannot set sid cookie in /api/session:", e);
     }
 
-    console.log(`[session] resolved sid=${sid} (from=${sidSource || 'unknown'}) referer=${referer || '-'}`);
+    console.log(`[session] resolved sid=${sid} (from=${sidSource || 'unknown'}) referer=${referer || '-'}, cookieDomain=${cookieDomain || '-'}`);
 
     return res.json({ sessionId: sid, source: sidSource || "unknown" });
   } catch (err) {
@@ -176,8 +186,7 @@ app.get("/api/session", async (req, res) => {
 /*
   Behavior:
    - Prefer sid from query -> body -> cookie -> referer
-   - If no sid found, create one once and set cookie (but prefer client to call /api/session first)
-   - Always set cookie and return sessionId in response header + body
+   - If not present, generate one, set cookie (but prefer client call /api/session first)
 */
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
@@ -186,6 +195,12 @@ app.post("/api/agent", async (req, res) => {
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
     const referer = req.get("referer") || req.headers.referer || null;
+
+    // debug logs to help see what client actually sent
+    console.log("[agent] incoming cookies:", req.cookies);
+    console.log("[agent] incoming cookie header:", req.get("cookie"));
+    console.log("[agent] incoming referer:", referer);
+
     // priority: query -> body -> cookie -> referer
     let sid =
       (req.query && req.query.sid) ||
@@ -194,7 +209,6 @@ app.post("/api/agent", async (req, res) => {
       extractSidFromUrl(referer) ||
       null;
 
-    // If still not present, generate one (but set cookie so subsequent requests keep it)
     let sidSource = null;
     if (req.query && req.query.sid) sidSource = "query";
     else if (req.body && req.body.sid) sidSource = "body";
@@ -202,16 +216,18 @@ app.post("/api/agent", async (req, res) => {
     else if (extractSidFromUrl(referer)) sidSource = "referer";
 
     if (!sid) {
+      // generate one (but it's important client should call /api/session first)
       sid = new ObjectId().toString();
       sidSource = "generated";
     }
 
-    // set cookie for persistence (client must allow cookies; use credentials on fetch)
+    // When referer exists, try to set cookie domain to share cookie across subdomains
     try {
       if (!req.cookies || req.cookies.sid !== sid) {
+        const cookieDomain = referer ? baseDomainFromHost(new URL(referer).hostname) : null;
         const cookieOptions = (process.env.NODE_ENV === "production")
-          ? { httpOnly: false, sameSite: "none", secure: true, maxAge: 30 * 24 * 60 * 60 * 1000 }
-          : { httpOnly: false, sameSite: "lax", secure: false, maxAge: 30 * 24 * 60 * 60 * 1000 };
+          ? { httpOnly: false, sameSite: "none", secure: true, domain: cookieDomain || undefined, maxAge: 30 * 24 * 60 * 60 * 1000 }
+          : { httpOnly: false, sameSite: "lax", secure: false, domain: cookieDomain || undefined, maxAge: 30 * 24 * 60 * 60 * 1000 };
 
         res.cookie("sid", sid, cookieOptions);
       }
@@ -219,7 +235,7 @@ app.post("/api/agent", async (req, res) => {
       console.warn("⚠️ Cannot set sid cookie:", e);
     }
 
-    console.log(`[agent] resolved sid=${sid} (from=${sidSource || 'unknown'}) referer=${referer || '-'}`);
+    console.log(`[agent] resolved sid=${sid} (from=${sidSource || 'unknown'}) referer=${referer || '-'})`);
 
     // Lấy question
     const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
