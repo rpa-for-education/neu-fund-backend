@@ -29,8 +29,14 @@ async function ensureIndexes(col) {
   }
 }
 
+function normalizeSessionId(sessionId) {
+  // Ép kiểu về chuẩn string, loại bỏ các ký tự thừa/trắng 2 đầu nếu có
+  return sessionId ? String(sessionId).trim() : null;
+}
+
 export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MAX) {
-  if (!sessionId) return;
+  const sessionIdStr = normalizeSessionId(sessionId);
+  if (!sessionIdStr) return;
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
 
@@ -39,9 +45,9 @@ export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MA
   const entry = { role, text, createdAt: new Date() };
 
   await col.updateOne(
-    { sessionId: String(sessionId) },
+    { sessionId: sessionIdStr },
     {
-      $setOnInsert: { createdAt: new Date(), sessionId: String(sessionId) },
+      $setOnInsert: { createdAt: new Date(), sessionId: sessionIdStr },
       $push: {
         entries: { $each: [entry], $slice: -maxEntries },
       },
@@ -51,14 +57,15 @@ export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MA
 }
 
 export async function getMemory(sessionId, limit = DEFAULT_MAX) {
-  if (!sessionId) return [];
+  const sessionIdStr = normalizeSessionId(sessionId);
+  if (!sessionIdStr) return [];
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
 
   await ensureIndexes(col);
 
   const doc = await col.findOne(
-    { sessionId: String(sessionId) },
+    { sessionId: sessionIdStr },
     { projection: { entries: 1 } }
   );
 
@@ -68,11 +75,12 @@ export async function getMemory(sessionId, limit = DEFAULT_MAX) {
 }
 
 export async function clearMemory(sessionId) {
-  if (!sessionId) return;
+  const sessionIdStr = normalizeSessionId(sessionId);
+  if (!sessionIdStr) return;
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
 
   await ensureIndexes(col);
 
-  await col.deleteOne({ sessionId: String(sessionId) });
+  await col.deleteOne({ sessionId: sessionIdStr });
 }
