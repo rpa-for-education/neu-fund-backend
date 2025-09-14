@@ -18,8 +18,17 @@ const DEFAULT_LIMIT_FUND = 100;
 const DEFAULT_SHORT_MEMORY_SIZE = parseInt(process.env.SHORT_MEMORY_SIZE || "5", 10);
 
 /* ===================== Express ===================== */
+/*
+  IMPORTANT:
+  - To allow cookies (so sid persists), enable credentials: true.
+  - In production set origin to your exact frontend origin (e.g. 'https://research.neu.edu.vn').
+*/
+const corsOptions = {
+  origin: true, // change to specific origin in production
+  credentials: true,
+};
 const app = express();
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json({ limit: "10mb" }));
 app.use(cookieParser()); // <-- để đọc cookie sid từ client
 
@@ -108,7 +117,7 @@ app.get("/api/funds", async (req, res) => {
   }
 });
 
-/* ===================== Agent API (with short-term memory) ===================== */
+/* ===================== Session helper: extract sid from URL ===================== */
 function extractSidFromUrl(maybeUrl) {
   if (!maybeUrl) return null;
   try {
@@ -119,14 +128,65 @@ function extractSidFromUrl(maybeUrl) {
   }
 }
 
+/* ===================== Session endpoint to establish canonical sessionId ====
+   Call this from frontend on page load. It will:
+     - check query.sid, cookie, referer
+     - if no sid found, create one and set cookie
+   Returns { sessionId, source } and sets cookie 'sid'
+   ============================================================================ */
+app.get("/api/session", async (req, res) => {
+  try {
+    const referer = req.get("referer") || req.headers.referer || null;
+
+    // priority: query.sid -> cookie -> referer -> generate
+    let sid = (req.query && req.query.sid) || (req.cookies && req.cookies.sid) || extractSidFromUrl(referer) || null;
+    let sidSource = null;
+    if (req.query && req.query.sid) sidSource = "query";
+    else if (req.cookies && req.cookies.sid) sidSource = "cookie";
+    else if (extractSidFromUrl(referer)) sidSource = "referer";
+
+    if (!sid) {
+      sid = new ObjectId().toString();
+      sidSource = "generated";
+    }
+
+    // cookie options - adjust secure/sameSite in production as needed
+    const cookieOptions = (process.env.NODE_ENV === "production")
+      ? { httpOnly: false, sameSite: "none", secure: true, maxAge: 30 * 24 * 60 * 60 * 1000 }
+      : { httpOnly: false, sameSite: "lax", secure: false, maxAge: 30 * 24 * 60 * 60 * 1000 };
+
+    try {
+      if (!req.cookies || req.cookies.sid !== sid) {
+        res.cookie("sid", sid, cookieOptions);
+      }
+    } catch (e) {
+      console.warn("⚠️ Cannot set sid cookie in /api/session:", e);
+    }
+
+    console.log(`[session] resolved sid=${sid} (from=${sidSource || 'unknown'}) referer=${referer || '-'}`);
+
+    return res.json({ sessionId: sid, source: sidSource || "unknown" });
+  } catch (err) {
+    console.error("❌ /api/session error:", err);
+    return res.status(500).json({ error: "Failed to resolve session" });
+  }
+});
+
+/* ===================== Agent API (with short-term memory) ===================== */
+/*
+  Behavior:
+   - Prefer sid from query -> body -> cookie -> referer
+   - If no sid found, create one once and set cookie (but prefer client to call /api/session first)
+   - Always set cookie and return sessionId in response header + body
+*/
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
   try {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
-    // ==== Ưu tiên lấy sid từ nhiều nguồn ====
     const referer = req.get("referer") || req.headers.referer || null;
+    // priority: query -> body -> cookie -> referer
     let sid =
       (req.query && req.query.sid) ||
       (req.body && req.body.sid) ||
@@ -134,23 +194,32 @@ app.post("/api/agent", async (req, res) => {
       extractSidFromUrl(referer) ||
       null;
 
+    // If still not present, generate one (but set cookie so subsequent requests keep it)
+    let sidSource = null;
+    if (req.query && req.query.sid) sidSource = "query";
+    else if (req.body && req.body.sid) sidSource = "body";
+    else if (req.cookies && req.cookies.sid) sidSource = "cookie";
+    else if (extractSidFromUrl(referer)) sidSource = "referer";
+
     if (!sid) {
       sid = new ObjectId().toString();
+      sidSource = "generated";
     }
 
+    // set cookie for persistence (client must allow cookies; use credentials on fetch)
     try {
       if (!req.cookies || req.cookies.sid !== sid) {
-        res.cookie("sid", sid, {
-          httpOnly: false,
-          sameSite: "lax",
-          maxAge: 30 * 24 * 60 * 60 * 1000,
-        });
+        const cookieOptions = (process.env.NODE_ENV === "production")
+          ? { httpOnly: false, sameSite: "none", secure: true, maxAge: 30 * 24 * 60 * 60 * 1000 }
+          : { httpOnly: false, sameSite: "lax", secure: false, maxAge: 30 * 24 * 60 * 60 * 1000 };
+
+        res.cookie("sid", sid, cookieOptions);
       }
     } catch (e) {
       console.warn("⚠️ Cannot set sid cookie:", e);
     }
 
-    console.log(`[agent] resolved sid=${sid} referer=${referer || "-"}`);
+    console.log(`[agent] resolved sid=${sid} (from=${sidSource || 'unknown'}) referer=${referer || '-'}`);
 
     // Lấy question
     const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
@@ -167,7 +236,7 @@ app.post("/api/agent", async (req, res) => {
       hits = [];
     }
 
-    // Ngữ cảnh ngắn
+    // Lấy ngữ cảnh ngắn (short-term memory)
     let memoryEntries = [];
     try {
       memoryEntries = await getMemory(sid, DEFAULT_SHORT_MEMORY_SIZE);
@@ -223,7 +292,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     try {
       await fundlogs.insertOne({
         question,
-        sessionId: sid, // 👈 sửa lại cho đồng bộ với fundsessions
+        sessionId: sid, // consistent camelCase
         asked_at: new Date(startedAt),
         answer: text,
         answered_at: new Date(),
@@ -248,10 +317,11 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       console.warn("⚠️ addToMemory failed:", e);
     }
 
+    // Also set header so client can read easily
     res.set("X-Session-Id", sid);
 
     return res.json({
-      sessionId: sid, // 👈 đổi key thành sessionId
+      sessionId: sid, // consistent with fundsessions field name
       model_id,
       answer: { answer: text, model: resolvedModel, provider },
       retrieved: { fund: hits },
