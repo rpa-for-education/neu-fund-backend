@@ -1,4 +1,4 @@
-// server.js
+// --- file: server.js ---
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -7,7 +7,7 @@ import { callLLM } from "./llm.js";
 import { encode } from "gpt-tokenizer";
 import { getDb } from "./db.js";
 import { fundVectorSearch, initEmbedding } from "./search.js";
-import { addToMemory, getMemory } from "./memory.js"; // <-- new
+import { addToMemory, getMemory } from "./memory.js"; // <-- short-term memory
 
 /* ===================== Env & constants ===================== */
 const PORT = process.env.PORT || 4000;
@@ -115,8 +115,14 @@ app.post("/api/agent", async (req, res) => {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
-    // Hỗ trợ cả question và prompt
-    const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5, session_id } = req.body || {};
+    // Ưu tiên lấy sid từ query ?sid=...
+    let { sid } = req.query;
+    if (!sid) {
+      sid = new ObjectId().toString(); // khởi tạo mới nếu chưa có
+    }
+
+    // Lấy question
+    const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
     const question = rawQuestion || prompt;
     if (!question?.trim()) return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
 
@@ -130,18 +136,16 @@ app.post("/api/agent", async (req, res) => {
       hits = [];
     }
 
-    // Lấy ngữ cảnh ngắn (short-term memory) nếu có session_id
+    // Lấy ngữ cảnh ngắn (short-term memory)
     let memoryEntries = [];
     try {
-      if (session_id) {
-        memoryEntries = await getMemory(session_id, DEFAULT_SHORT_MEMORY_SIZE);
-      }
+      memoryEntries = await getMemory(sid, DEFAULT_SHORT_MEMORY_SIZE);
     } catch (e) {
       console.warn("⚠️ getMemory failed:", e);
       memoryEntries = [];
     }
 
-    // 👉 Ghép dữ liệu retrieved + short-term memory vào prompt cho LLM
+    // Ghép context
     const contextText = hits
       .map(
         (f, i) =>
@@ -151,9 +155,7 @@ app.post("/api/agent", async (req, res) => {
       )
       .join("\n");
 
-    const memoryText = memoryEntries
-      .map((m, i) => `- [${m.role}] ${m.text}`)
-      .join("\n");
+    const memoryText = memoryEntries.map((m) => `- [${m.role}] ${m.text}`).join("\n");
 
     const promptText = `
 Người dùng hỏi: "${question}"
@@ -191,7 +193,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     try {
       await fundlogs.insertOne({
         question,
-        session_id: session_id || null,
+        session_id: sid,
         asked_at: new Date(startedAt),
         answer: text,
         answered_at: new Date(),
@@ -208,21 +210,20 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       console.error("⚠️ Cannot write fundlogs:", e);
     }
 
-    // Lưu vào short-term memory: user question + assistant answer
+    // Lưu memory
     try {
-      if (session_id) {
-        await addToMemory(session_id, "user", question, DEFAULT_SHORT_MEMORY_SIZE);
-        await addToMemory(session_id, "assistant", text, DEFAULT_SHORT_MEMORY_SIZE);
-      }
+      await addToMemory(sid, "user", question, DEFAULT_SHORT_MEMORY_SIZE);
+      await addToMemory(sid, "assistant", text, DEFAULT_SHORT_MEMORY_SIZE);
     } catch (e) {
       console.warn("⚠️ addToMemory failed:", e);
     }
 
     return res.json({
+      session_id: sid, // 👈 luôn trả sid về cho client
       model_id,
       answer: { answer: text, model: resolvedModel, provider },
       retrieved: { fund: hits },
-      memory: { session_id: session_id || null, entries_count: memoryEntries.length },
+      memory: { entries_count: memoryEntries.length },
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
   } catch (err) {
