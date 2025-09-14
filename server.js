@@ -7,12 +7,14 @@ import { callLLM } from "./llm.js";
 import { encode } from "gpt-tokenizer";
 import { getDb } from "./db.js";
 import { fundVectorSearch, initEmbedding } from "./search.js";
+import { addToMemory, getMemory } from "./memory.js"; // <-- new
 
 /* ===================== Env & constants ===================== */
 const PORT = process.env.PORT || 4000;
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
 const DEFAULT_LIMIT_FUND = 100; // 👈 số bản ghi Fund mặc định
+const DEFAULT_SHORT_MEMORY_SIZE = parseInt(process.env.SHORT_MEMORY_SIZE || "5", 10);
 
 /* ===================== Express ===================== */
 const app = express();
@@ -106,7 +108,7 @@ app.get("/api/funds", async (req, res) => {
   }
 });
 
-/* ===================== Agent API ===================== */
+/* ===================== Agent API (with short-term memory) ===================== */
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
   try {
@@ -114,7 +116,7 @@ app.post("/api/agent", async (req, res) => {
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
     // Hỗ trợ cả question và prompt
-    const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
+    const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5, session_id } = req.body || {};
     const question = rawQuestion || prompt;
     if (!question?.trim()) return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
 
@@ -128,7 +130,18 @@ app.post("/api/agent", async (req, res) => {
       hits = [];
     }
 
-    // 👉 Ghép dữ liệu retrieved vào prompt cho LLM
+    // Lấy ngữ cảnh ngắn (short-term memory) nếu có session_id
+    let memoryEntries = [];
+    try {
+      if (session_id) {
+        memoryEntries = await getMemory(session_id, DEFAULT_SHORT_MEMORY_SIZE);
+      }
+    } catch (e) {
+      console.warn("⚠️ getMemory failed:", e);
+      memoryEntries = [];
+    }
+
+    // 👉 Ghép dữ liệu retrieved + short-term memory vào prompt cho LLM
     const contextText = hits
       .map(
         (f, i) =>
@@ -138,9 +151,14 @@ app.post("/api/agent", async (req, res) => {
       )
       .join("\n");
 
+    const memoryText = memoryEntries
+      .map((m, i) => `- [${m.role}] ${m.text}`)
+      .join("\n");
+
     const promptText = `
 Người dùng hỏi: "${question}"
 
+${memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n" : ""}
 Dưới đây là danh sách quỹ có liên quan:
 ${contextText}
 
@@ -173,6 +191,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     try {
       await fundlogs.insertOne({
         question,
+        session_id: session_id || null,
         asked_at: new Date(startedAt),
         answer: text,
         answered_at: new Date(),
@@ -189,10 +208,21 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       console.error("⚠️ Cannot write fundlogs:", e);
     }
 
+    // Lưu vào short-term memory: user question + assistant answer
+    try {
+      if (session_id) {
+        await addToMemory(session_id, "user", question, DEFAULT_SHORT_MEMORY_SIZE);
+        await addToMemory(session_id, "assistant", text, DEFAULT_SHORT_MEMORY_SIZE);
+      }
+    } catch (e) {
+      console.warn("⚠️ addToMemory failed:", e);
+    }
+
     return res.json({
       model_id,
       answer: { answer: text, model: resolvedModel, provider },
       retrieved: { fund: hits },
+      memory: { session_id: session_id || null, entries_count: memoryEntries.length },
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
   } catch (err) {
