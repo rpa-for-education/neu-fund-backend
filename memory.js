@@ -4,7 +4,7 @@
 
 import { getDb } from "./db.js";
 
-const DEFAULT_COLLECTION = process.env.SESSION_COLLECTION || "sessions";
+const DEFAULT_COLLECTION = process.env.SESSION_COLLECTION || "fundsessions";
 const DEFAULT_MAX = parseInt(process.env.SHORT_MEMORY_SIZE || "5", 10);
 
 export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MAX) {
