@@ -30,7 +30,7 @@ async function ensureIndexes(col) {
 }
 
 function normalizeSessionId(sessionId) {
-  // Đảm bảo sid là string, loại bỏ ký tự trắng thừa
+  // Đảm bảo sessionId là một string duy nhất, loại bỏ ký tự trắng thừa
   return sessionId ? String(sessionId).trim() : null;
 }
 
@@ -43,7 +43,6 @@ export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MA
   await ensureIndexes(col);
 
   const entry = { role, text, createdAt: new Date() };
-
   await col.updateOne(
     { sessionId: sessionIdStr },
     {
