@@ -113,10 +113,10 @@ app.post("/api/agent", async (req, res) => {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
-    // Ưu tiên lấy sid từ query ?sid=...
-    let sid = req.query.sid;
+    // Ưu tiên lấy sid từ query, nếu không có thì từ body, nếu vẫn không thì tạo mới
+    let sid = req.query.sid || req.body?.sid;
     if (!sid) {
-      sid = new ObjectId().toString(); // nếu không có thì tạo mới
+      sid = new ObjectId().toString();
     }
 
     // Lấy question
