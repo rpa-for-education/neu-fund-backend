@@ -10,9 +10,22 @@ const DEFAULT_MAX = parseInt(process.env.SHORT_MEMORY_SIZE || "5", 10);
 // đảm bảo index unique cho sessionId
 async function ensureIndexes(col) {
   try {
+    // ép sessionId luôn là string
+    await col.updateMany(
+      { sessionId: { $type: "objectId" } },
+      [{ $set: { sessionId: { $toString: "$sessionId" } } }]
+    );
+
+    // tạo index unique (drop nếu đã tồn tại conflict)
+    const indexes = await col.indexes();
+    const hasSessionIdx = indexes.find((idx) => idx.key && idx.key.sessionId);
+    if (hasSessionIdx && !hasSessionIdx.unique) {
+      await col.dropIndex(hasSessionIdx.name);
+    }
+
     await col.createIndex({ sessionId: 1 }, { unique: true });
   } catch (err) {
-    console.error("Failed to ensure index on sessionId:", err.message);
+    console.error("⚠️ ensureIndexes failed:", err.message);
   }
 }
 
@@ -25,11 +38,10 @@ export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MA
 
   const entry = { role, text, createdAt: new Date() };
 
-  // updateOne thay vì insertOne → không tạo doc mới mỗi lần
   await col.updateOne(
-    { sessionId },
+    { sessionId: String(sessionId) },
     {
-      $setOnInsert: { createdAt: new Date(), sessionId },
+      $setOnInsert: { createdAt: new Date(), sessionId: String(sessionId) },
       $push: {
         entries: { $each: [entry], $slice: -maxEntries },
       },
@@ -45,9 +57,12 @@ export async function getMemory(sessionId, limit = DEFAULT_MAX) {
 
   await ensureIndexes(col);
 
-  const doc = await col.findOne({ sessionId }, { projection: { entries: 1 } });
+  const doc = await col.findOne(
+    { sessionId: String(sessionId) },
+    { projection: { entries: 1 } }
+  );
+
   if (!doc?.entries) return [];
-  // return last `limit` entries in chronological order
   const entries = Array.isArray(doc.entries) ? doc.entries.slice(-limit) : [];
   return entries;
 }
@@ -59,5 +74,5 @@ export async function clearMemory(sessionId) {
 
   await ensureIndexes(col);
 
-  await col.deleteOne({ sessionId });
+  await col.deleteOne({ sessionId: String(sessionId) });
 }
