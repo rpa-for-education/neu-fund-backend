@@ -21,7 +21,7 @@ const DEFAULT_SHORT_MEMORY_SIZE = parseInt(process.env.SHORT_MEMORY_SIZE || "5",
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
-app.use(cookieParser());
+app.use(cookieParser()); // <-- để đọc cookie sid từ client
 
 /* ===================== Helpers ===================== */
 function getPagination(req) {
@@ -109,17 +109,48 @@ app.get("/api/funds", async (req, res) => {
 });
 
 /* ===================== Agent API (with short-term memory) ===================== */
+function extractSidFromUrl(maybeUrl) {
+  if (!maybeUrl) return null;
+  try {
+    const u = new URL(maybeUrl);
+    return u.searchParams.get("sid") || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
   try {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
-    // 👉 Chỉ lấy sid từ query hoặc cookie
-    let sid = req.query.sid || req.cookies.sid;
+    // ==== Ưu tiên lấy sid từ nhiều nguồn ====
+    const referer = req.get("referer") || req.headers.referer || null;
+    let sid =
+      (req.query && req.query.sid) ||
+      (req.body && req.body.sid) ||
+      (req.cookies && req.cookies.sid) ||
+      extractSidFromUrl(referer) ||
+      null;
+
     if (!sid) {
-      return res.status(400).json({ error: "Missing session ID" });
+      sid = new ObjectId().toString();
     }
+
+    try {
+      if (!req.cookies || req.cookies.sid !== sid) {
+        res.cookie("sid", sid, {
+          httpOnly: false,
+          sameSite: "lax",
+          maxAge: 30 * 24 * 60 * 60 * 1000,
+        });
+      }
+    } catch (e) {
+      console.warn("⚠️ Cannot set sid cookie:", e);
+    }
+
+    console.log(`[agent] resolved sid=${sid} referer=${referer || "-"}`);
 
     // Lấy question
     const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
@@ -136,7 +167,7 @@ app.post("/api/agent", async (req, res) => {
       hits = [];
     }
 
-    // Lấy ngữ cảnh ngắn (short-term memory)
+    // Ngữ cảnh ngắn
     let memoryEntries = [];
     try {
       memoryEntries = await getMemory(sid, DEFAULT_SHORT_MEMORY_SIZE);
@@ -192,7 +223,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     try {
       await fundlogs.insertOne({
         question,
-        session_id: sid,
+        sessionId: sid, // 👈 sửa lại cho đồng bộ với fundsessions
         asked_at: new Date(startedAt),
         answer: text,
         answered_at: new Date(),
@@ -217,8 +248,10 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       console.warn("⚠️ addToMemory failed:", e);
     }
 
+    res.set("X-Session-Id", sid);
+
     return res.json({
-      session_id: sid, // 👈 luôn trả sid về cho client
+      sessionId: sid, // 👈 đổi key thành sessionId
       model_id,
       answer: { answer: text, model: resolvedModel, provider },
       retrieved: { fund: hits },
@@ -247,4 +280,4 @@ if (!process.env.VERCEL) {
   })();
 }
 
-export default app
+export default app;
