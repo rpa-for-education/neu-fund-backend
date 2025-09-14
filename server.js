@@ -2,35 +2,27 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import cookieParser from "cookie-parser";
 import { ObjectId } from "mongodb";
 import { callLLM } from "./llm.js";
 import { encode } from "gpt-tokenizer";
 import { getDb } from "./db.js";
 import { fundVectorSearch, initEmbedding } from "./search.js";
-import { addToMemory, getMemory } from "./memory.js"; // <-- short-term memory
+import { addToMemory, getMemory } from "./memory.js"; // short-term memory
 
 /* ===================== Env & constants ===================== */
 const PORT = process.env.PORT || 4000;
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
 const DEFAULT_LIMIT_FUND = 100;
-const DEFAULT_SHORT_MEMORY_SIZE = parseInt(process.env.SHORT_MEMORY_SIZE || "5", 10);
+const DEFAULT_SHORT_MEMORY_SIZE = parseInt(
+  process.env.SHORT_MEMORY_SIZE || "5",
+  10
+);
 
 /* ===================== Express ===================== */
-/*
-  IMPORTANT:
-  - To allow cookies (so sid persists), enable credentials: true.
-  - In production set origin to your exact frontend origin (e.g. 'https://research.neu.edu.vn').
-*/
-const corsOptions = {
-  origin: true, // change to specific origin in production
-  credentials: true,
-};
 const app = express();
-app.use(cors(corsOptions));
+app.use(cors());
 app.use(express.json({ limit: "10mb" }));
-app.use(cookieParser()); // <-- để đọc cookie sid từ client
 
 /* ===================== Helpers ===================== */
 function getPagination(req) {
@@ -58,7 +50,9 @@ app.get("/api/health", async (_req, res) => {
       status: "ok",
       db: "connected",
       collection: MONGO_COLLECTION,
-      counts: { fund: await db.collection(MONGO_COLLECTION).estimatedDocumentCount() },
+      counts: {
+        fund: await db.collection(MONGO_COLLECTION).estimatedDocumentCount(),
+      },
     });
   } catch (e) {
     res.status(500).json({ status: "error", error: e.message });
@@ -71,22 +65,35 @@ app.get("/api/funds", async (req, res) => {
     const { q } = req.query;
     const { limit, skip, page } = getPagination(req);
 
-    const filter = buildSearchFilter(q, ["OPPORTUNITY TITLE", "OPPORTUNITY URL", "_key"]);
+    const filter = buildSearchFilter(q, [
+      "OPPORTUNITY TITLE",
+      "OPPORTUNITY URL",
+      "_key",
+    ]);
     const col = await Funds();
 
     if (!limit) {
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+      });
       const cursor = col
-        .find(filter, { projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 } })
+        .find(filter, {
+          projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 },
+        })
         .sort({ POSTED_DATE: -1 })
         .limit(DEFAULT_LIMIT_FUND);
 
       const total = await col.countDocuments(filter);
       let first = true;
-      res.write(`{"page":1,"limit":${DEFAULT_LIMIT_FUND},"total":${total},"items":[`);
+      res.write(
+        `{"page":1,"limit":${DEFAULT_LIMIT_FUND},"total":${total},"items":[`
+      );
 
       await cursor.forEach((doc) => {
-        const mapped = { name: doc["OPPORTUNITY TITLE"], url: doc["OPPORTUNITY URL"] };
+        const mapped = {
+          name: doc["OPPORTUNITY TITLE"],
+          url: doc["OPPORTUNITY URL"],
+        };
         if (!first) res.write(",");
         res.write(JSON.stringify(mapped));
         first = false;
@@ -96,7 +103,9 @@ app.get("/api/funds", async (req, res) => {
       res.end();
     } else {
       const cursor = col
-        .find(filter, { projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 } })
+        .find(filter, {
+          projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 },
+        })
         .sort({ POSTED_DATE: -1 });
 
       const [items, total] = await Promise.all([
@@ -117,142 +126,41 @@ app.get("/api/funds", async (req, res) => {
   }
 });
 
-/* ===================== Session helper: extract sid from URL ===================== */
-function extractSidFromUrl(maybeUrl) {
-  if (!maybeUrl) return null;
-  try {
-    const u = new URL(maybeUrl);
-    return u.searchParams.get("sid") || null;
-  } catch (e) {
-    return null;
-  }
-}
-
-// lấy base domain heuristic (ví dụ: "research.neu.edu.vn" -> ".neu.edu.vn")
-function baseDomainFromHost(hostname) {
-  if (!hostname) return null;
-  const parts = hostname.split(".").filter(Boolean);
-  if (parts.length <= 2) return hostname; // e.g. localhost or domain.tld
-  return "." + parts.slice(-2).join(".");
-}
-
-/* ===================== Session endpoint to establish canonical sessionId ====
-   Call this from frontend on page load. It will:
-     - check query.sid, cookie, referer
-     - if no sid found, create one and set cookie (with domain guessed from referer)
-   Returns { sessionId, source } and sets cookie 'sid'
-   ============================================================================ */
-app.get("/api/session", async (req, res) => {
-  try {
-    const referer = req.get("referer") || req.headers.referer || null;
-
-    // priority: query.sid -> cookie -> referer -> generate
-    let sid = (req.query && req.query.sid) || (req.cookies && req.cookies.sid) || extractSidFromUrl(referer) || null;
-    let sidSource = null;
-    if (req.query && req.query.sid) sidSource = "query";
-    else if (req.cookies && req.cookies.sid) sidSource = "cookie";
-    else if (extractSidFromUrl(referer)) sidSource = "referer";
-
-    if (!sid) {
-      sid = new ObjectId().toString();
-      sidSource = "generated";
-    }
-
-    // determine cookie domain from referer if possible to allow subdomain sharing
-    const cookieDomain = referer ? baseDomainFromHost(new URL(referer).hostname) : null;
-
-    const cookieOptions = (process.env.NODE_ENV === "production")
-      ? { httpOnly: false, sameSite: "none", secure: true, domain: cookieDomain || undefined, maxAge: 30 * 24 * 60 * 60 * 1000 }
-      : { httpOnly: false, sameSite: "lax", secure: false, domain: cookieDomain || undefined, maxAge: 30 * 24 * 60 * 60 * 1000 };
-
-    try {
-      if (!req.cookies || req.cookies.sid !== sid) {
-        res.cookie("sid", sid, cookieOptions);
-      }
-    } catch (e) {
-      console.warn("⚠️ Cannot set sid cookie in /api/session:", e);
-    }
-
-    console.log(`[session] resolved sid=${sid} (from=${sidSource || 'unknown'}) referer=${referer || '-'}, cookieDomain=${cookieDomain || '-'}`);
-
-    return res.json({ sessionId: sid, source: sidSource || "unknown" });
-  } catch (err) {
-    console.error("❌ /api/session error:", err);
-    return res.status(500).json({ error: "Failed to resolve session" });
-  }
-});
-
-/* ===================== Agent API (with short-term memory) ===================== */
-/*
-  Behavior:
-   - Prefer sid from query -> body -> cookie -> referer
-   - If not present, generate one, set cookie (but prefer client call /api/session first)
-*/
+/* ===================== Agent API (short-term memory) ===================== */
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
   try {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
-    const referer = req.get("referer") || req.headers.referer || null;
-
-    // debug logs to help see what client actually sent
-    console.log("[agent] incoming cookies:", req.cookies);
-    console.log("[agent] incoming cookie header:", req.get("cookie"));
-    console.log("[agent] incoming referer:", referer);
-
-    // priority: query -> body -> cookie -> referer
-    let sid =
-      (req.query && req.query.sid) ||
-      (req.body && req.body.sid) ||
-      (req.cookies && req.cookies.sid) ||
-      extractSidFromUrl(referer) ||
-      null;
-
-    let sidSource = null;
-    if (req.query && req.query.sid) sidSource = "query";
-    else if (req.body && req.body.sid) sidSource = "body";
-    else if (req.cookies && req.cookies.sid) sidSource = "cookie";
-    else if (extractSidFromUrl(referer)) sidSource = "referer";
-
+    // 👇 chỉ lấy sid từ query/body, không dùng cookie
+    let sid = req.query.sid || (req.body && req.body.sid) || null;
     if (!sid) {
-      // generate one (but it's important client should call /api/session first)
       sid = new ObjectId().toString();
-      sidSource = "generated";
     }
 
-    // When referer exists, try to set cookie domain to share cookie across subdomains
-    try {
-      if (!req.cookies || req.cookies.sid !== sid) {
-        const cookieDomain = referer ? baseDomainFromHost(new URL(referer).hostname) : null;
-        const cookieOptions = (process.env.NODE_ENV === "production")
-          ? { httpOnly: false, sameSite: "none", secure: true, domain: cookieDomain || undefined, maxAge: 30 * 24 * 60 * 60 * 1000 }
-          : { httpOnly: false, sameSite: "lax", secure: false, domain: cookieDomain || undefined, maxAge: 30 * 24 * 60 * 60 * 1000 };
-
-        res.cookie("sid", sid, cookieOptions);
-      }
-    } catch (e) {
-      console.warn("⚠️ Cannot set sid cookie:", e);
-    }
-
-    console.log(`[agent] resolved sid=${sid} (from=${sidSource || 'unknown'}) referer=${referer || '-'})`);
+    console.log(`[agent] using sid=${sid}`);
 
     // Lấy question
-    const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
+    const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } =
+      req.body || {};
     const question = rawQuestion || prompt;
-    if (!question?.trim()) return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
+    if (!question?.trim())
+      return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
 
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
     try {
       hits = await fundVectorSearch(question, k);
-      hits = hits.map(({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest);
+      hits = hits.map(
+        ({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest
+      );
     } catch (e) {
       console.error("⚠️ fundVectorSearch failed:", e);
       hits = [];
     }
 
-    // Lấy ngữ cảnh ngắn (short-term memory)
+    // Ngữ cảnh ngắn
     let memoryEntries = [];
     try {
       memoryEntries = await getMemory(sid, DEFAULT_SHORT_MEMORY_SIZE);
@@ -264,18 +172,22 @@ app.post("/api/agent", async (req, res) => {
     const contextText = hits
       .map(
         (f, i) =>
-          `${i + 1}. ${f["OPPORTUNITY TITLE"] || ""} - ${f["AGENCY NAME"] || ""} - ${
-            f["OPPORTUNITY URL"] || ""
-          }`
+          `${i + 1}. ${f["OPPORTUNITY TITLE"] || ""} - ${
+            f["AGENCY NAME"] || ""
+          } - ${f["OPPORTUNITY URL"] || ""}`
       )
       .join("\n");
 
-    const memoryText = memoryEntries.map((m) => `- [${m.role}] ${m.text}`).join("\n");
+    const memoryText = memoryEntries
+      .map((m) => `- [${m.role}] ${m.text}`)
+      .join("\n");
 
     const promptText = `
 Người dùng hỏi: "${question}"
 
-${memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n" : ""}
+${
+  memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n" : ""
+}
 Dưới đây là danh sách quỹ có liên quan:
 ${contextText}
 
@@ -308,7 +220,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     try {
       await fundlogs.insertOne({
         question,
-        sessionId: sid, // consistent camelCase
+        sessionId: sid,
         asked_at: new Date(startedAt),
         answer: text,
         answered_at: new Date(),
@@ -333,11 +245,8 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       console.warn("⚠️ addToMemory failed:", e);
     }
 
-    // Also set header so client can read easily
-    res.set("X-Session-Id", sid);
-
     return res.json({
-      sessionId: sid, // consistent with fundsessions field name
+      sessionId: sid,
       model_id,
       answer: { answer: text, model: resolvedModel, provider },
       retrieved: { fund: hits },
