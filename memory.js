@@ -11,11 +11,18 @@ export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MA
   if (!sessionId) return;
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
+
   const entry = { role, text, createdAt: new Date() };
-  // push entry then trim array to last `maxEntries`
+
+  // updateOne thay vì insertOne → không tạo doc mới mỗi lần
   await col.updateOne(
     { sessionId },
-    { $push: { entries: { $each: [entry], $slice: -maxEntries } }, $setOnInsert: { createdAt: new Date() } },
+    {
+      $setOnInsert: { createdAt: new Date(), sessionId },
+      $push: {
+        entries: { $each: [entry], $slice: -maxEntries },
+      },
+    },
     { upsert: true }
   );
 }

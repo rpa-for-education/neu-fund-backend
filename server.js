@@ -13,7 +13,7 @@ import { addToMemory, getMemory } from "./memory.js"; // <-- short-term memory
 const PORT = process.env.PORT || 4000;
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
-const DEFAULT_LIMIT_FUND = 100; 
+const DEFAULT_LIMIT_FUND = 100;
 const DEFAULT_SHORT_MEMORY_SIZE = parseInt(process.env.SHORT_MEMORY_SIZE || "5", 10);
 
 /* ===================== Express ===================== */
