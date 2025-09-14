@@ -2,6 +2,7 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import { ObjectId } from "mongodb";
 import { callLLM } from "./llm.js";
 import { encode } from "gpt-tokenizer";
@@ -20,6 +21,7 @@ const DEFAULT_SHORT_MEMORY_SIZE = parseInt(process.env.SHORT_MEMORY_SIZE || "5",
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
+app.use(cookieParser()); // <-- để đọc cookie sid từ client
 
 /* ===================== Helpers ===================== */
 function getPagination(req) {
@@ -107,17 +109,63 @@ app.get("/api/funds", async (req, res) => {
 });
 
 /* ===================== Agent API (with short-term memory) ===================== */
+function extractSidFromUrl(maybeUrl) {
+  if (!maybeUrl) return null;
+  try {
+    const u = new URL(maybeUrl);
+    return u.searchParams.get("sid") || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
   try {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
-    // Ưu tiên lấy sid từ query, nếu không có thì từ body, nếu vẫn không thì tạo mới
-    let sid = req.query.sid || req.body?.sid;
+    // ==== MỚI: Ưu tiên lấy sid từ (1) query ?sid=..., (2) body.sid, (3) cookie 'sid', (4) referer link chứa ?sid=..., (5) tạo mới ====
+    // Thứ tự này đảm bảo: nếu user bấm link chứa sid trên trang, server có thể lấy sid từ referer khi client không kèm sid trong body/query.
+    const referer = req.get("referer") || req.headers.referer || null;
+    let sid =
+      (req.query && req.query.sid) ||
+      (req.body && req.body.sid) ||
+      (req.cookies && req.cookies.sid) ||
+      extractSidFromUrl(referer) ||
+      null;
+
+    const sidSource = (() => {
+      if (req.query && req.query.sid) return "query";
+      if (req.body && req.body.sid) return "body";
+      if (req.cookies && req.cookies.sid) return "cookie";
+      if (extractSidFromUrl(referer)) return "referer";
+      return null;
+    })();
+
+    // Nếu vẫn không có sid thì tạo mới
     if (!sid) {
       sid = new ObjectId().toString();
+      // đánh dấu nguồn là 'generated'
     }
+
+    // Nếu client chưa có cookie sid, ghi cookie để client gửi lần sau (tăng khả năng giữ session)
+    try {
+      // set cookie chỉ khi cookie chưa có hoặc khác
+      if (!req.cookies || req.cookies.sid !== sid) {
+        // httpOnly để client JS không đọc; nếu bạn muốn client JS đọc để gắn vào URL thì set httpOnly: false
+        // Mình để httpOnly: false để frontend có thể đọc và đẩy lên URL nếu cần — bạn có thể đổi tuỳ ý.
+        res.cookie("sid", sid, {
+          httpOnly: false,
+          sameSite: "lax",
+          maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+        });
+      }
+    } catch (e) {
+      console.warn("⚠️ Cannot set sid cookie:", e);
+    }
+
+    console.log(`[agent] resolved sid=${sid} (from=${sidSource || "generated"}) referer=${referer || "-"}`);
 
     // Lấy question
     const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
@@ -214,6 +262,9 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     } catch (e) {
       console.warn("⚠️ addToMemory failed:", e);
     }
+
+    // Trả sid trong body và header để client dễ nhận biết
+    res.set("X-Session-Id", sid);
 
     return res.json({
       session_id: sid, // 👈 luôn trả sid về cho client
