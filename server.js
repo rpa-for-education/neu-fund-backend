@@ -1,33 +1,142 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import session from "express-session"; // thêm import này
+import session from "express-session";
 import { ObjectId } from "mongodb";
 import { callLLM } from "./llm.js";
 import { encode } from "gpt-tokenizer";
 import { getDb } from "./db.js";
 import { fundVectorSearch, initEmbedding } from "./search.js";
-import { addToMemory, getMemory } from "./memory.js"; // short-term memory
+import { addToMemory, getMemory } from "./memory.js";
+
 
 /* ===================== Env & constants ===================== */
 const PORT = process.env.PORT || 4000;
-//... các hằng số khác giữ nguyên
+const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
+const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
+const DEFAULT_LIMIT_FUND = 100;
+const DEFAULT_SHORT_MEMORY_SIZE = parseInt(
+  process.env.SHORT_MEMORY_SIZE || "5",
+  10
+);
+
 
 /* ===================== Express ===================== */
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
-
-// Thêm middleware express-session
 app.use(session({
-  secret: process.env.SESSION_SECRET || "fitneu2025", // nên đặt trong .env
+  secret: process.env.SESSION_SECRET || "fitneu2025",
   resave: false,
   saveUninitialized: true,
-  cookie: { secure: false } // nếu dùng HTTPS thì đặt true
+  cookie: { secure: false }
 }));
+app.use(express.json({ limit: "10mb" }));
 
 
-// ... các hàm helper và route giữ nguyên
+/* ===================== Helpers ===================== */
+function getPagination(req) {
+  const page = parseInt(req.query.page) > 0 ? parseInt(req.query.page) : 1;
+  const limit = parseInt(req.query.limit) > 0 ? parseInt(req.query.limit) : 0;
+  const skip = limit ? (page - 1) * limit : 0;
+  return { page, limit, skip };
+}
+function buildSearchFilter(q, fields = []) {
+  if (!q) return {};
+  const regex = { $regex: q, $options: "i" };
+  return { $or: fields.map((f) => ({ [f]: regex })) };
+}
+async function Funds() {
+  const db = await getDb();
+  return db.collection(MONGO_COLLECTION);
+}
+
+
+/* ===================== Healthcheck ===================== */
+app.get("/api/health", async (_req, res) => {
+  try {
+    const db = await getDb();
+    await initEmbedding().catch(() => {});
+    res.json({
+      status: "ok",
+      db: "connected",
+      collection: MONGO_COLLECTION,
+      counts: {
+        fund: await db.collection(MONGO_COLLECTION).estimatedDocumentCount(),
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ status: "error", error: e.message });
+  }
+});
+
+
+/* ===================== Fund APIs ===================== */
+app.get("/api/funds", async (req, res) => {
+  try {
+    const { q } = req.query;
+    const { limit, skip, page } = getPagination(req);
+
+    const filter = buildSearchFilter(q, [
+      "OPPORTUNITY TITLE",
+      "OPPORTUNITY URL",
+      "_key",
+    ]);
+    const col = await Funds();
+
+    if (!limit) {
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+      });
+      const cursor = col
+        .find(filter, {
+          projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 },
+        })
+        .sort({ POSTED_DATE: -1 })
+        .limit(DEFAULT_LIMIT_FUND);
+
+      const total = await col.countDocuments(filter);
+      let first = true;
+      res.write(
+        `{"page":1,"limit":${DEFAULT_LIMIT_FUND},"total":${total},"items":[`
+      );
+
+      await cursor.forEach((doc) => {
+        const mapped = {
+          name: doc["OPPORTUNITY TITLE"],
+          url: doc["OPPORTUNITY URL"],
+        };
+        if (!first) res.write(",");
+        res.write(JSON.stringify(mapped));
+        first = false;
+      });
+
+      res.write("]}");
+      res.end();
+    } else {
+      const cursor = col
+        .find(filter, {
+          projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 },
+        })
+        .sort({ POSTED_DATE: -1 });
+
+      const [items, total] = await Promise.all([
+        cursor.skip(skip).limit(limit).toArray(),
+        col.countDocuments(filter),
+      ]);
+
+      const mappedItems = items.map((doc) => ({
+        name: doc["OPPORTUNITY TITLE"],
+        url: doc["OPPORTUNITY URL"],
+      }));
+
+      res.json({ page, limit, total, items: mappedItems });
+    }
+  } catch (err) {
+    console.error("❌ /api/funds error:", err);
+    res.status(500).json({ error: "Failed to fetch funds", detail: err.message });
+  }
+});
+
 
 /* ===================== Agent API (short-term memory) ===================== */
 app.post("/api/agent", async (req, res) => {
@@ -44,25 +153,12 @@ app.post("/api/agent", async (req, res) => {
       isNewSession = true;
     }
 
-    // Hoặc nếu vẫn muốn dùng sessionId tự tạo thì dùng đoạn gốc:
-    /*
-    sid = req.query.sid || (req.body && req.body.sid) || null;
-    if (!sid) {
-      sid = new ObjectId().toString();
-      isNewSession = true;
-    }
-    sid = String(sid);
-    */
-
-    
-    console.log(req);
-    // Phần còn lại giữ nguyên, chỉ thay thế sid từ trên
-
-    const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } =
-      req.body || {};
+    const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
     const question = rawQuestion || prompt;
     if (!question?.trim())
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
+
+    console.log("SessionID:", sid, "Question:", question);
 
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
@@ -100,11 +196,9 @@ app.post("/api/agent", async (req, res) => {
     const promptText = `
 Người dùng hỏi: "${question}"
 
-
 ${memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n" : ""}
 Dưới đây là danh sách quỹ có liên quan:
 ${contextText}
-
 
 Hãy trả lời bằng tiếng Việt, liệt kê rõ tên quỹ, cơ quan cấp và đường dẫn. 
 Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy quỹ phù hợp".
@@ -173,6 +267,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
+
 
 /* ===================== Boot ===================== */
 if (!process.env.VERCEL) {
