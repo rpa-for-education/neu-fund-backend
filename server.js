@@ -132,6 +132,8 @@ app.post("/api/agent", async (req, res) => {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
+    console.log(req);
+
     // ---- SESSIONID logic bắt đầu ----
     let sid = req.query.sid || (req.body && req.body.sid) || null;
     let isNewSession = false;
