@@ -9,31 +9,28 @@ import { getDb } from "./db.js";
 import { fundVectorSearch, initEmbedding } from "./search.js";
 import { addToMemory, getMemory } from "./memory.js";
 
-
 /* ===================== Env & constants ===================== */
 const PORT = process.env.PORT || 4000;
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
 const DEFAULT_LIMIT_FUND = 100;
-const DEFAULT_SHORT_MEMORY_SIZE = parseInt(
-  process.env.SHORT_MEMORY_SIZE || "5",
-  10
-);
-
-
-/* ===================== Express ===================== */
-const app = express();
-app.use(cors());
-app.use(session({
-  secret: process.env.SESSION_SECRET || "fitneu2025",
-  resave: false,
-  saveUninitialized: true,
-  cookie: { secure: false }
-}));
-app.use(express.json({ limit: "10mb" }));
-
+// Thay đổi kích thước nhớ ngắn hạn thành 10 câu gần nhất
+const DEFAULT_SHORT_MEMORY_SIZE = 10;
 
 /* ===================== Helpers ===================== */
+// Hàm format text trả về dạng dễ đọc, bỏ dấu **, xuống dòng rõ ràng
+function formatAnswerText(rawText) {
+  if (!rawText) return "";
+  // Bỏ dấu ** in đậm
+  let text = rawText.replace(/\*\*/g, "");
+  // Chuyển các số mục lục "1." thành dấu gạch đầu dòng, thêm xuống dòng rõ
+  text = text.replace(/(\d+)\.\s+/g, "\n- ");
+  // Thêm khoảng cách dòng giữa các đoạn (nếu chưa có)
+  text = text.replace(/\n+/g, "\n\n");
+  // Loại bỏ khoảng trắng thừa 2 phía
+  return text.trim();
+}
+
 function getPagination(req) {
   const page = parseInt(req.query.page) > 0 ? parseInt(req.query.page) : 1;
   const limit = parseInt(req.query.limit) > 0 ? parseInt(req.query.limit) : 0;
@@ -50,6 +47,16 @@ async function Funds() {
   return db.collection(MONGO_COLLECTION);
 }
 
+/* ===================== Express ===================== */
+const app = express();
+app.use(cors());
+app.use(session({
+  secret: process.env.SESSION_SECRET || "fitneu2025",
+  resave: false,
+  saveUninitialized: true,
+  cookie: { secure: false }
+}));
+app.use(express.json({ limit: "10mb" }));
 
 /* ===================== Healthcheck ===================== */
 app.get("/api/health", async (_req, res) => {
@@ -68,7 +75,6 @@ app.get("/api/health", async (_req, res) => {
     res.status(500).json({ status: "error", error: e.message });
   }
 });
-
 
 /* ===================== Fund APIs ===================== */
 app.get("/api/funds", async (req, res) => {
@@ -137,7 +143,6 @@ app.get("/api/funds", async (req, res) => {
   }
 });
 
-
 /* ===================== Agent API (short-term memory) ===================== */
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
@@ -145,7 +150,6 @@ app.post("/api/agent", async (req, res) => {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
-    // Dùng session của express-session
     let sid = req.sessionID;
     let isNewSession = false;
     if (!req.session.isInitialized) {
@@ -174,6 +178,7 @@ app.post("/api/agent", async (req, res) => {
 
     let memoryEntries = [];
     try {
+      // Lấy 10 câu hội thoại gần nhất theo sid
       memoryEntries = await getMemory(sid, DEFAULT_SHORT_MEMORY_SIZE);
     } catch (e) {
       console.warn("⚠️ getMemory failed:", e);
@@ -215,6 +220,9 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       provider = llmRes.provider ?? null;
       resolvedModel = llmRes.model ?? resolvedModel;
     }
+
+    // Format câu trả lời cho đẹp, dễ đọc
+    text = formatAnswerText(text);
 
     let prompt_tokens = null,
       answer_tokens = null,
@@ -267,7 +275,6 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
-
 
 /* ===================== Boot ===================== */
 if (!process.env.VERCEL) {
