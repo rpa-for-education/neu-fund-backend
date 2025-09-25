@@ -54,6 +54,8 @@ app.post("/api/agent", async (req, res) => {
     sid = String(sid);
     */
 
+    
+    console.log(req);
     // Phần còn lại giữ nguyên, chỉ thay thế sid từ trên
 
     const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } =
