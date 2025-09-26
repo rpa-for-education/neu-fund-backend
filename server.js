@@ -48,7 +48,6 @@ app.use(session({
   saveUninitialized: true,
   cookie: { secure: false }
 }));
-
 app.use(express.json({ limit: "10mb" }));
 
 // Middleware lấy sid từ query hoặc param rồi gán vào session
@@ -62,8 +61,6 @@ app.use((req, _res, next) => {
   }
   next();
 });
-
-/* Các route /api/health, /api/funds giống như cũ */
 
 app.get("/api/health", async (_req, res) => {
   try {
@@ -148,15 +145,13 @@ app.get("/api/funds", async (req, res) => {
   }
 });
 
-/* Route /api/agent sử dụng sid đã gán trong session */
-
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
   try {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
-    // Sử dụng sid từ customSid nếu có, ngược lại dùng req.sessionID
+    // Sử dụng sid lấy từ query hoặc param, nếu không có mới dùng sessionID express-session
     const sid = req.session.customSid || req.sessionID;
 
     let isNewSession = false;
@@ -167,6 +162,7 @@ app.post("/api/agent", async (req, res) => {
 
     const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
     const question = rawQuestion || prompt;
+
     if (!question?.trim()) {
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
     }
