@@ -139,8 +139,11 @@ app.post("/api/agent", async (req, res) => {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
-    // Lấy sid theo ưu tiên từ query, body rồi param, fallback về sessionID nếu không có
-    let sid = req.query.sid || req.body.sid || req.params.sid || req.sessionID;
+    // BẮT BUỘC phải truyền sid từ client qua query, body hoặc header x-session-id
+    let sid = req.query.sid || req.body.sid || req.headers['x-session-id'];
+    if (!sid) {
+      return res.status(400).json({ error: "Thiếu thông tin sessionId dạng UUID từ client (query/body/header)" });
+    }
 
     let isNewSession = false;
     if (!req.session.isInitialized) {
