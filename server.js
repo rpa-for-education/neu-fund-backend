@@ -50,18 +50,6 @@ app.use(session({
 }));
 app.use(express.json({ limit: "10mb" }));
 
-// Middleware lấy sid từ query hoặc param rồi gán vào session
-app.use((req, _res, next) => {
-  const sidFromQuery = req.query.sid;
-  const sidFromParams = req.params?.sid;
-  if (sidFromQuery) {
-    req.session.customSid = sidFromQuery;
-  } else if (sidFromParams) {
-    req.session.customSid = sidFromParams;
-  }
-  next();
-});
-
 app.get("/api/health", async (_req, res) => {
   try {
     const db = await getDb();
@@ -151,8 +139,8 @@ app.post("/api/agent", async (req, res) => {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
-    // Sử dụng sid lấy từ query hoặc param, nếu không có mới dùng sessionID express-session
-    const sid = req.session.customSid || req.sessionID;
+    // Lấy sid theo ưu tiên từ query, body rồi param, fallback về sessionID nếu không có
+    let sid = req.query.sid || req.body.sid || req.params.sid || req.sessionID;
 
     let isNewSession = false;
     if (!req.session.isInitialized) {
