@@ -9,25 +9,17 @@ import { getDb } from "./db.js";
 import { fundVectorSearch, initEmbedding } from "./search.js";
 import { addToMemory, getMemory } from "./memory.js";
 
-/* ===================== Env & constants ===================== */
 const PORT = process.env.PORT || 4000;
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
 const DEFAULT_LIMIT_FUND = 100;
-// Thay đổi kích thước nhớ ngắn hạn thành 10 câu gần nhất
 const DEFAULT_SHORT_MEMORY_SIZE = 10;
 
-/* ===================== Helpers ===================== */
-// Hàm format text trả về dạng dễ đọc, bỏ dấu **, xuống dòng rõ ràng
 function formatAnswerText(rawText) {
   if (!rawText) return "";
-  // Bỏ dấu ** in đậm
   let text = rawText.replace(/\*\*/g, "");
-  // Chuyển các số mục lục "1." thành dấu gạch đầu dòng, thêm xuống dòng rõ
   text = text.replace(/(\d+)\.\s+/g, "\n- ");
-  // Thêm khoảng cách dòng giữa các đoạn (nếu chưa có)
   text = text.replace(/\n+/g, "\n\n");
-  // Loại bỏ khoảng trắng thừa 2 phía
   return text.trim();
 }
 
@@ -48,7 +40,6 @@ async function Funds() {
   return db.collection(MONGO_COLLECTION);
 }
 
-/* ===================== Express ===================== */
 const app = express();
 app.use(cors());
 app.use(session({
@@ -57,9 +48,23 @@ app.use(session({
   saveUninitialized: true,
   cookie: { secure: false }
 }));
+
 app.use(express.json({ limit: "10mb" }));
 
-/* ===================== Healthcheck ===================== */
+// Middleware lấy sid từ query hoặc param rồi gán vào session
+app.use((req, _res, next) => {
+  const sidFromQuery = req.query.sid;
+  const sidFromParams = req.params?.sid;
+  if (sidFromQuery) {
+    req.session.customSid = sidFromQuery;
+  } else if (sidFromParams) {
+    req.session.customSid = sidFromParams;
+  }
+  next();
+});
+
+/* Các route /api/health, /api/funds giống như cũ */
+
 app.get("/api/health", async (_req, res) => {
   try {
     const db = await getDb();
@@ -77,7 +82,6 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
-/* ===================== Fund APIs ===================== */
 app.get("/api/funds", async (req, res) => {
   try {
     const { q } = req.query;
@@ -144,15 +148,17 @@ app.get("/api/funds", async (req, res) => {
   }
 });
 
-/* ===================== Agent API (short-term memory) ===================== */
+/* Route /api/agent sử dụng sid đã gán trong session */
+
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
   try {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
-    // Sửa dòng này: trả về sessionId rõ ràng
-    const sessionId = req.sessionID;
+    // Sử dụng sid từ customSid nếu có, ngược lại dùng req.sessionID
+    const sid = req.session.customSid || req.sessionID;
+
     let isNewSession = false;
     if (!req.session.isInitialized) {
       req.session.isInitialized = true;
@@ -161,8 +167,9 @@ app.post("/api/agent", async (req, res) => {
 
     const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
     const question = rawQuestion || prompt;
-    if (!question?.trim())
+    if (!question?.trim()) {
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
+    }
 
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
@@ -177,7 +184,7 @@ app.post("/api/agent", async (req, res) => {
 
     let memoryEntries = [];
     try {
-      memoryEntries = await getMemory(sessionId, DEFAULT_SHORT_MEMORY_SIZE);
+      memoryEntries = await getMemory(sid, DEFAULT_SHORT_MEMORY_SIZE);
     } catch (e) {
       memoryEntries = [];
     }
@@ -231,7 +238,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     try {
       await fundlogs.insertOne({
         question,
-        sessionId,
+        sessionId: sid,
         asked_at: new Date(startedAt),
         answer: text,
         answered_at: new Date(),
@@ -247,13 +254,12 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     } catch (e) {}
 
     try {
-      await addToMemory(sessionId, "user", question, DEFAULT_SHORT_MEMORY_SIZE);
-      await addToMemory(sessionId, "assistant", text, DEFAULT_SHORT_MEMORY_SIZE);
+      await addToMemory(sid, "user", question, DEFAULT_SHORT_MEMORY_SIZE);
+      await addToMemory(sid, "assistant", text, DEFAULT_SHORT_MEMORY_SIZE);
     } catch (e) {}
 
-    // Trả sessionId về response, client nhận và đồng bộ các request sau
     return res.json({
-      sessionId,
+      sessionId: sid,
       isNewSession,
       model_id,
       answer: { answer: text, model: resolvedModel, provider },
@@ -266,7 +272,6 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
   }
 });
 
-/* ===================== Boot ===================== */
 if (!process.env.VERCEL) {
   (async () => {
     try {
