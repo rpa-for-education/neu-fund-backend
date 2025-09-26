@@ -37,6 +37,7 @@ function getPagination(req) {
   const skip = limit ? (page - 1) * limit : 0;
   return { page, limit, skip };
 }
+
 function buildSearchFilter(q, fields = []) {
   if (!q) return {};
   const regex = { $regex: q, $options: "i" };
@@ -150,7 +151,8 @@ app.post("/api/agent", async (req, res) => {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
 
-    let sid = req.sessionID;
+    // Sửa dòng này: trả về sessionId rõ ràng
+    const sessionId = req.sessionID;
     let isNewSession = false;
     if (!req.session.isInitialized) {
       req.session.isInitialized = true;
@@ -162,8 +164,6 @@ app.post("/api/agent", async (req, res) => {
     if (!question?.trim())
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
 
-    console.log("👉 Nội dung server trả về:", res.prompt);
-
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
     try {
@@ -172,25 +172,20 @@ app.post("/api/agent", async (req, res) => {
         ({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest
       );
     } catch (e) {
-      console.error("⚠️ fundVectorSearch failed:", e);
       hits = [];
     }
 
     let memoryEntries = [];
     try {
-      // Lấy 10 câu hội thoại gần nhất theo sid
-      memoryEntries = await getMemory(sid, DEFAULT_SHORT_MEMORY_SIZE);
+      memoryEntries = await getMemory(sessionId, DEFAULT_SHORT_MEMORY_SIZE);
     } catch (e) {
-      console.warn("⚠️ getMemory failed:", e);
       memoryEntries = [];
     }
 
     const contextText = hits
       .map(
         (f, i) =>
-          `${i + 1}. ${f["OPPORTUNITY TITLE"] || ""} - ${
-            f["AGENCY NAME"] || ""
-          } - ${f["OPPORTUNITY URL"] || ""}`
+          `${i + 1}. ${f["OPPORTUNITY TITLE"] || ""} - ${f["AGENCY NAME"] || ""} - ${f["OPPORTUNITY URL"] || ""}`
       )
       .join("\n");
 
@@ -221,7 +216,6 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       resolvedModel = llmRes.model ?? resolvedModel;
     }
 
-    // Format câu trả lời cho đẹp, dễ đọc
     text = formatAnswerText(text);
 
     let prompt_tokens = null,
@@ -237,7 +231,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     try {
       await fundlogs.insertOne({
         question,
-        sessionId: sid,
+        sessionId,
         asked_at: new Date(startedAt),
         answer: text,
         answered_at: new Date(),
@@ -250,19 +244,16 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
         meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
         createdAt: new Date(),
       });
-    } catch (e) {
-      console.error("⚠️ Cannot write fundlogs:", e);
-    }
+    } catch (e) {}
 
     try {
-      await addToMemory(sid, "user", question, DEFAULT_SHORT_MEMORY_SIZE);
-      await addToMemory(sid, "assistant", text, DEFAULT_SHORT_MEMORY_SIZE);
-    } catch (e) {
-      console.warn("⚠️ addToMemory failed:", e);
-    }
+      await addToMemory(sessionId, "user", question, DEFAULT_SHORT_MEMORY_SIZE);
+      await addToMemory(sessionId, "assistant", text, DEFAULT_SHORT_MEMORY_SIZE);
+    } catch (e) {}
 
+    // Trả sessionId về response, client nhận và đồng bộ các request sau
     return res.json({
-      sessionId: sid,
+      sessionId,
       isNewSession,
       model_id,
       answer: { answer: text, model: resolvedModel, provider },
@@ -271,7 +262,6 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
   } catch (err) {
-    console.error("❌ /api/agent error:", err);
     return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
