@@ -162,7 +162,9 @@ app.post("/api/agent", async (req, res) => {
     if (!question?.trim())
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
 
-    console.log(req.body);
+
+    const data = await response.json();  // parse JSON từ res
+    console.log("👉 Nội dung server trả về:", data);
 
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
