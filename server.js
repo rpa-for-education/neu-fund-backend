@@ -133,17 +133,21 @@ app.get("/api/funds", async (req, res) => {
   }
 });
 
-// Lấy sessionId từ path param :sid
-app.post("/api/chat/sessions/:sid/send", async (req, res) => {
+// Cách tự xử lý chuỗi req.path lấy sid thủ công
+app.post("/api/chat/sessions/*/send", async (req, res) => {
   const startedAt = Date.now();
   try {
+    // Lấy sessionId từ req.path tự động
+    const segments = req.path.split("/");
+    const sidIndex = segments.indexOf("sessions") + 1;
+    const sid = sidIndex > 0 && sidIndex < segments.length ? segments[sidIndex] : null;
+
+    if (!sid) {
+      return res.status(400).json({ error: "Không tìm thấy sessionId trong đường dẫn" });
+    }
+
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
-
-    const sid = req.params.sid;
-    if (!sid) {
-      return res.status(400).json({ error: "Thiếu tham số sessionId trong URL path" });
-    }
 
     let isNewSession = false;
     if (!req.session.isInitialized) {
@@ -258,6 +262,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
+
 
 if (!process.env.VERCEL) {
   (async () => {
