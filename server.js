@@ -40,6 +40,25 @@ async function Funds() {
   return db.collection(MONGO_COLLECTION);
 }
 
+function extractSid(req) {
+  const segments = (req.path || "").split("/");
+  let sid = null;
+  const idx = segments.indexOf("sessions");
+  if (idx >= 0 && segments.length > idx + 1) {
+    sid = segments[idx + 1];
+  }
+  if (!sid && req.headers[":path"]) {
+    const headerPath = req.headers[":path"];
+    const segs = headerPath.split("/");
+    const idx2 = segs.indexOf("sessions");
+    if (idx2 >= 0 && segs.length > idx2 + 1) {
+      sid = segs[idx2 + 1];
+    }
+  }
+  if (!sid) sid = req.query.sid || req.body.sid || req.headers["x-session-id"];
+  return sid;
+}
+
 const app = express();
 app.use(cors());
 app.use(session({
@@ -71,14 +90,12 @@ app.get("/api/funds", async (req, res) => {
   try {
     const { q } = req.query;
     const { limit, skip, page } = getPagination(req);
-
     const filter = buildSearchFilter(q, [
       "OPPORTUNITY TITLE",
       "OPPORTUNITY URL",
       "_key",
     ]);
     const col = await Funds();
-
     if (!limit) {
       res.writeHead(200, {
         "Content-Type": "application/json; charset=utf-8",
@@ -89,13 +106,11 @@ app.get("/api/funds", async (req, res) => {
         })
         .sort({ POSTED_DATE: -1 })
         .limit(DEFAULT_LIMIT_FUND);
-
       const total = await col.countDocuments(filter);
       let first = true;
       res.write(
         `{"page":1,"limit":${DEFAULT_LIMIT_FUND},"total":${total},"items":[`
       );
-
       await cursor.forEach((doc) => {
         const mapped = {
           name: doc["OPPORTUNITY TITLE"],
@@ -105,7 +120,6 @@ app.get("/api/funds", async (req, res) => {
         res.write(JSON.stringify(mapped));
         first = false;
       });
-
       res.write("]}");
       res.end();
     } else {
@@ -114,17 +128,14 @@ app.get("/api/funds", async (req, res) => {
           projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 },
         })
         .sort({ POSTED_DATE: -1 });
-
       const [items, total] = await Promise.all([
         cursor.skip(skip).limit(limit).toArray(),
         col.countDocuments(filter),
       ]);
-
       const mappedItems = items.map((doc) => ({
         name: doc["OPPORTUNITY TITLE"],
         url: doc["OPPORTUNITY URL"],
       }));
-
       res.json({ page, limit, total, items: mappedItems });
     }
   } catch (err) {
@@ -133,64 +144,43 @@ app.get("/api/funds", async (req, res) => {
   }
 });
 
-// Cách tự xử lý chuỗi req.path lấy sid thủ công
-app.post("/api/chat/sessions/*/send", async (req, res) => {
+app.post("*", async (req, res) => {
   const startedAt = Date.now();
   try {
-    // Lấy sessionId từ req.path tự động
-    const segments = req.path.split("/");
-    const sidIndex = segments.indexOf("sessions") + 1;
-    const sid = sidIndex > 0 && sidIndex < segments.length ? segments[sidIndex] : null;
-
+    const sid = extractSid(req);
     if (!sid) {
-      return res.status(400).json({ error: "Không tìm thấy sessionId trong đường dẫn" });
+      return res.status(400).json({ error: "Không tìm thấy sessionId (sid) trong đường dẫn, header, query hoặc body." });
     }
-
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
-
     let isNewSession = false;
     if (!req.session.isInitialized) {
       req.session.isInitialized = true;
       isNewSession = true;
     }
-
     const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
     const question = rawQuestion || prompt;
-
     if (!question?.trim()) {
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
     }
-
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
     try {
       hits = await fundVectorSearch(question, k);
-      hits = hits.map(
-        ({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest
-      );
+      hits = hits.map(({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest);
     } catch (e) {
       hits = [];
     }
-
     let memoryEntries = [];
     try {
       memoryEntries = await getMemory(sid, DEFAULT_SHORT_MEMORY_SIZE);
     } catch (e) {
       memoryEntries = [];
     }
-
     const contextText = hits
-      .map(
-        (f, i) =>
-          `${i + 1}. ${f["OPPORTUNITY TITLE"] || ""} - ${f["AGENCY NAME"] || ""} - ${f["OPPORTUNITY URL"] || ""}`
-      )
+      .map((f, i) => `${i + 1}. ${f["OPPORTUNITY TITLE"] || ""} - ${f["AGENCY NAME"] || ""} - ${f["OPPORTUNITY URL"] || ""}`)
       .join("\n");
-
-    const memoryText = memoryEntries
-      .map((m) => `- [${m.role}] ${m.text}`)
-      .join("\n");
-
+    const memoryText = memoryEntries.map((m) => `- [${m.role}] ${m.text}`).join("\n");
     const promptText = `
 Người dùng hỏi: "${question}"
 
@@ -201,9 +191,7 @@ ${contextText}
 Hãy trả lời bằng tiếng Việt, liệt kê rõ tên quỹ, cơ quan cấp và đường dẫn. 
 Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy quỹ phù hợp".
     `;
-
     const llmRes = await callLLM(promptText, model_id);
-
     let text = "";
     let provider = null;
     let resolvedModel = model_id;
@@ -213,9 +201,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       provider = llmRes.provider ?? null;
       resolvedModel = llmRes.model ?? resolvedModel;
     }
-
     text = formatAnswerText(text);
-
     let prompt_tokens = null,
       answer_tokens = null,
       tokens_used = null;
@@ -224,7 +210,6 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       answer_tokens = encode(text).length;
       tokens_used = prompt_tokens + answer_tokens;
     } catch (_) {}
-
     const response_time_ms = Date.now() - startedAt;
     try {
       await fundlogs.insertOne({
@@ -243,12 +228,10 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
         createdAt: new Date(),
       });
     } catch (e) {}
-
     try {
       await addToMemory(sid, "user", question, DEFAULT_SHORT_MEMORY_SIZE);
       await addToMemory(sid, "assistant", text, DEFAULT_SHORT_MEMORY_SIZE);
     } catch (e) {}
-
     return res.json({
       sessionId: sid,
       isNewSession,
@@ -262,7 +245,6 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
-
 
 if (!process.env.VERCEL) {
   (async () => {
