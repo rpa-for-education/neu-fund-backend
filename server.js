@@ -162,7 +162,7 @@ app.post("/api/agent", async (req, res) => {
     if (!question?.trim())
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
 
-    console.log("SessionID:", sid, "Question:", question);
+    console.log(req.body);
 
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
