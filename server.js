@@ -5,7 +5,7 @@ import cors from "cors";
 import session from "express-session";
 import multer from "multer";
 import fs from "fs";
-import pdfParse from "pdf-parse";
+import pdfParse from "pdf-parse/lib/pdf-parse.js";
 import mammoth from "mammoth";
 
 import { ObjectId } from "mongodb";
