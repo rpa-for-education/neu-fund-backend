@@ -2,16 +2,24 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import session from "express-session";
+import multer from "multer";
+import fs from "fs";
+import pdfParse from "pdf-parse";
+import mammoth from "mammoth";
+
 import { ObjectId } from "mongodb";
 import { callLLM } from "./llm.js";
 import { encode } from "gpt-tokenizer";
 import { getDb } from "./db.js";
-import { fundVectorSearch, initEmbedding } from "./search.js";
+import { fundVectorSearch, initEmbedding, embedText } from "./search.js";
 import { addToMemory, getMemory } from "./memory.js";
+import { s3Client } from "./s3.js";
+import { PutObjectCommand } from "@aws-sdk/client-s3";
 
 const PORT = process.env.PORT || 4000;
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
+const FILES_COLLECTION = process.env.FILES_COLLECTION || "uploaded_files";
 const DEFAULT_LIMIT_FUND = 100;
 const DEFAULT_SHORT_MEMORY_SIZE = 10;
 
@@ -50,6 +58,76 @@ app.use(session({
 }));
 app.use(express.json({ limit: "10mb" }));
 
+// ========= FILE UPLOAD =========
+const upload = multer({ storage: multer.memoryStorage() });
+
+app.post("/api/upload", upload.array("file"), async (req, res) => {
+  try {
+    const { folder, userEmail } = req.body;
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const db = await getDb();
+    const fileCol = db.collection(FILES_COLLECTION);
+
+    const uploadedUrls = [];
+    for (const file of req.files) {
+      const parts = file.originalname.split(".");
+      const ext = parts.length > 1 ? "." + parts.pop() : "";
+      const baseName = parts.join(".");
+      const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, "");
+      const uniqueName = `${baseName}_${timestamp}${ext}`;
+      const prefix = userEmail || folder || "";
+      const key = prefix ? `${prefix}/${uniqueName}` : uniqueName;
+
+      // Upload to MinIO
+      await s3Client.send(
+        new PutObjectCommand({
+          Bucket: process.env.MINIO_BUCKET_NAME,
+          Key: key,
+          Body: file.buffer,
+          ContentType: file.mimetype,
+        })
+      );
+
+      const fileUrl = `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}/${process.env.MINIO_BUCKET_NAME}/${key}`;
+
+      // Extract text
+      let extractedText = "";
+      if (ext === ".pdf") {
+        const data = await pdfParse(file.buffer);
+        extractedText = data.text;
+      } else if (ext === ".docx") {
+        const { value } = await mammoth.extractRawText({ buffer: file.buffer });
+        extractedText = value;
+      } else if (ext === ".txt") {
+        extractedText = file.buffer.toString("utf8");
+      }
+
+      // Save embedding
+      if (extractedText.trim()) {
+        const embedding = await embedText(extractedText);
+        await fileCol.insertOne({
+          name: uniqueName,
+          url: fileUrl,
+          text: extractedText,
+          vector: embedding,
+          uploadedAt: new Date(),
+        });
+      }
+
+      uploadedUrls.push(fileUrl);
+    }
+
+    res.json({ status: "success", files: uploadedUrls });
+  } catch (err) {
+    console.error("❌ Upload error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========= HEALTH =========
 app.get("/api/health", async (_req, res) => {
   try {
     const db = await getDb();
@@ -60,6 +138,7 @@ app.get("/api/health", async (_req, res) => {
       collection: MONGO_COLLECTION,
       counts: {
         fund: await db.collection(MONGO_COLLECTION).estimatedDocumentCount(),
+        files: await db.collection(FILES_COLLECTION).estimatedDocumentCount(),
       },
     });
   } catch (e) {
@@ -67,6 +146,7 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
+// ========= FUNDS =========
 app.get("/api/funds", async (req, res) => {
   try {
     const { q } = req.query;
@@ -133,15 +213,15 @@ app.get("/api/funds", async (req, res) => {
   }
 });
 
+// ========= AGENT =========
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
   try {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
+    const fileCol = db.collection(FILES_COLLECTION);
 
-    // Sử dụng sessionID mặc định của express-session
     const sid = req.sessionID;
-
     let isNewSession = false;
     if (!req.session.isInitialized) {
       req.session.isInitialized = true;
@@ -150,20 +230,54 @@ app.post("/api/agent", async (req, res) => {
 
     const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
     const question = rawQuestion || prompt;
-
     if (!question?.trim()) {
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
     }
 
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
+    let fileHits = [];
+
     try {
       hits = await fundVectorSearch(question, k);
       hits = hits.map(
         ({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest
       );
+
+      // Search in uploaded files
+      const queryVec = await embedText(question);
+      fileHits = await fileCol
+        .aggregate([
+          {
+            $addFields: {
+              similarity: {
+                $let: {
+                  vars: {
+                    dot: {
+                      $reduce: {
+                        input: { $range: [0, { $size: "$vector" }] },
+                        initialValue: 0,
+                        in: {
+                          $add: [
+                            "$$value",
+                            { $multiply: [queryVec["$$this"], "$vector.$$this"] },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                  in: "$$dot",
+                },
+              },
+            },
+          },
+          { $sort: { similarity: -1 } },
+          { $limit: k },
+        ])
+        .toArray();
     } catch (e) {
       hits = [];
+      fileHits = [];
     }
 
     let memoryEntries = [];
@@ -180,6 +294,10 @@ app.post("/api/agent", async (req, res) => {
       )
       .join("\n");
 
+    const fileContext = fileHits
+      .map((f, i) => `${i + 1}. ${f.name} - ${f.url}`)
+      .join("\n");
+
     const memoryText = memoryEntries
       .map((m) => `- [${m.role}] ${m.text}`)
       .join("\n");
@@ -191,8 +309,11 @@ ${memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n"
 Dưới đây là danh sách quỹ có liên quan:
 ${contextText}
 
-Hãy trả lời bằng tiếng Việt, liệt kê rõ tên quỹ, cơ quan cấp và đường dẫn. 
-Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy quỹ phù hợp".
+Dưới đây là các file người dùng đã tải lên có liên quan:
+${fileContext}
+
+Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và đường dẫn. 
+Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy dữ liệu phù hợp".
     `;
 
     const llmRes = await callLLM(promptText, model_id);
@@ -232,6 +353,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
         model: resolvedModel,
         topk: k,
         hits: hits.slice(0, 5),
+        fileHits: fileHits.slice(0, 5),
         meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
         createdAt: new Date(),
       });
@@ -247,7 +369,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       isNewSession,
       model_id,
       answer: { answer: text, model: resolvedModel, provider },
-      retrieved: { fund: hits },
+      retrieved: { fund: hits, files: fileHits },
       memory: { entries_count: memoryEntries.length },
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
