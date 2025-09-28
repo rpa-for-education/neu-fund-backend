@@ -1,3 +1,4 @@
+// server.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -74,7 +75,7 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
     const uploadedUrls = [];
     for (const file of req.files) {
       const parts = file.originalname.split(".");
-      const ext = parts.length > 1 ? "." + parts.pop() : "";
+      const ext = parts.length > 1 ? "." + parts.pop().toLowerCase() : "";
       const baseName = parts.join(".");
       const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, "");
       const uniqueName = `${baseName}_${timestamp}${ext}`;

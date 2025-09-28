@@ -1,11 +1,12 @@
 // search.js
 import { pipeline } from "@xenova/transformers";
 import { getDb } from "./db.js";
+import fs from "fs/promises";
 
 const MAX_TOPK = parseInt(process.env.MAX_TOPK || "30", 10);
 const VECTOR_INDEX_NAME = process.env.VECTOR_INDEX_FUND || "vector_index_fund";
 const VECTOR_PATH = process.env.VECTOR_PATH || "vector";
-
+const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 
 let embedder = null;
 
@@ -35,16 +36,53 @@ async function embed(text) {
 }
 
 /**
+ * Alias export để khớp với server.js
+ */
+export async function embedText(text) {
+  return embed(text);
+}
+
+/**
+ * Upload file → đọc nội dung → nhúng → lưu MongoDB
+ * @param {string} filePath
+ * @returns {Promise<{insertedId}>}
+ */
+export async function uploadAndIndexFile(filePath) {
+  const db = await getDb();
+  const col = db.collection(MONGO_COLLECTION);
+
+  // Đọc file
+  const content = await fs.readFile(filePath, "utf8");
+  if (!content || !content.trim()) {
+    throw new Error("❌ File rỗng hoặc không đọc được nội dung.");
+  }
+
+  // Sinh vector
+  const vector = await embed(content);
+
+  // Lưu vào Mongo
+  const doc = {
+    text: content,
+    [VECTOR_PATH]: vector,
+    createdAt: new Date(),
+  };
+
+  const result = await col.insertOne(doc);
+  console.log(`✅ File đã được index vào MongoDB với _id=${result.insertedId}`);
+  return result;
+}
+
+/**
  * Vector search trên collection 'fund'
- * @param {string} question
+ * @param {string} query
  * @param {number} topk
  * @returns {Promise<Array<{_id, score, ...payload}>>}
  */
-export async function fundVectorSearch(question, topk = 5) {
+export async function fundVectorSearch(query, topk = 5) {
   const db = await getDb();
-  const col = db.collection(process.env.MONGO_COLLECTION || "fund");
+  const col = db.collection(MONGO_COLLECTION);
 
-  const queryVector = await embed(question);
+  const queryVector = await embed(query);
   const safeTopK = Math.min(Number(topk) || 5, MAX_TOPK);
 
   console.log(`🔎 Querying with vector length: ${queryVector.length}, topK=${safeTopK}`);
@@ -62,7 +100,7 @@ export async function fundVectorSearch(question, topk = 5) {
     },
     {
       $project: {
-        vector: 0,
+        [VECTOR_PATH]: 0,
         score: { $meta: "vectorSearchScore" },
       },
     },
@@ -71,7 +109,7 @@ export async function fundVectorSearch(question, topk = 5) {
   const items = await col.aggregate(pipelineAgg).toArray();
 
   if (!items || items.length === 0) {
-    console.warn("⚠️ No results found for query:", question);
+    console.warn("⚠️ No results found for query:", query);
     return [];
   }
 
