@@ -229,12 +229,27 @@ app.post("/api/agent", async (req, res) => {
       isNewSession = true;
     }
 
-    const { question: rawQuestion, prompt, model_id = "qwen-max", topk = 5 } = req.body || {};
-    const question = rawQuestion || prompt;
+    let { question: rawQuestion, prompt, model_id, topk = 5, fileName, files } = req.body || {};
+    let question = rawQuestion || prompt;
+
+    // fallback nếu không có prompt/question
+    if (!question?.trim()) {
+      if (Array.isArray(files) && files.length > 0) {
+        if (files.length === 1) {
+          question = `Hãy đọc nội dung của file ${files[0]}`;
+        } else {
+          question = `Hãy đọc nội dung các file: ${files.join(", ")}`;
+        }
+      } else if (fileName) {
+        question = `Hãy đọc nội dung của file ${fileName}`;
+      }
+    }
+
     if (!question?.trim()) {
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
     }
 
+    const resolvedModel = model_id || "qwen-max";
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
     let fileHits = [];
@@ -317,16 +332,14 @@ Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và 
 Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy dữ liệu phù hợp".
     `;
 
-    const llmRes = await callLLM(promptText, model_id);
+    const llmRes = await callLLM(promptText, resolvedModel);
 
     let text = "";
     let provider = null;
-    let resolvedModel = model_id;
     if (typeof llmRes === "string") text = llmRes;
     else if (llmRes && typeof llmRes === "object") {
       text = llmRes.answer ?? llmRes.text ?? llmRes.content ?? "";
       provider = llmRes.provider ?? null;
-      resolvedModel = llmRes.model ?? resolvedModel;
     }
 
     text = formatAnswerText(text);
@@ -349,9 +362,8 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
         answer: text,
         answered_at: new Date(),
         withLLM: true,
-        model_id,
+        model_id: resolvedModel,
         provider,
-        model: resolvedModel,
         topk: k,
         hits: hits.slice(0, 5),
         fileHits: fileHits.slice(0, 5),
@@ -368,7 +380,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     return res.json({
       sessionId: sid,
       isNewSession,
-      model_id,
+      model_id: resolvedModel,
       answer: { answer: text, model: resolvedModel, provider },
       retrieved: { fund: hits, files: fileHits },
       memory: { entries_count: memoryEntries.length },
