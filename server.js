@@ -222,6 +222,8 @@ app.post("/api/agent", async (req, res) => {
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
     const fileCol = db.collection(FILES_COLLECTION);
 
+    console.log(req.body);
+    
     const sid = req.sessionID;
     let isNewSession = false;
     if (!req.session.isInitialized) {
