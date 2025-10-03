@@ -223,7 +223,7 @@ app.post("/api/agent", async (req, res) => {
     const fileCol = db.collection(FILES_COLLECTION);
 
     console.log(req.body);
-    
+
     const sid = req.body.session_id;
     let isNewSession = false;
     if (!req.session.isInitialized) {
@@ -301,8 +301,10 @@ app.post("/api/agent", async (req, res) => {
     let memoryEntries = [];
     try {
       memoryEntries = await getMemory(sid, DEFAULT_SHORT_MEMORY_SIZE);
+      console.log("Memory entries retrieved:", memoryEntries);
     } catch (e) {
       memoryEntries = [];
+      console.error("Get memory error:", e);
     }
 
     const contextText = hits
@@ -317,18 +319,22 @@ app.post("/api/agent", async (req, res) => {
       .join("\n");
 
     const memoryText = memoryEntries
+      .filter(m => m && typeof m.role === "string" && typeof m.text === "string")
       .map((m) => `- [${m.role}] ${m.text}`)
       .join("\n");
 
     const promptText = `
 Người dùng hỏi: "${question}"
 
+
 ${memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n" : ""}
 Dưới đây là danh sách quỹ có liên quan:
 ${contextText}
 
+
 Dưới đây là các file người dùng đã tải lên có liên quan:
 ${fileContext}
+
 
 Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và đường dẫn. 
 Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy dữ liệu phù hợp".
@@ -376,10 +382,25 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       });
     } catch (e) {}
 
-    try {
-      await addToMemory(sid, "user", question, DEFAULT_SHORT_MEMORY_SIZE);
-      await addToMemory(sid, "assistant", text, DEFAULT_SHORT_MEMORY_SIZE);
-    } catch (e) {}
+    // Bổ sung xử lý lưu vào memory an toàn (chuyển sang string, thêm try-catch)
+    const cleanQuestion = question ? String(question).trim() : "";
+    const cleanText = text ? String(text).trim() : "";
+
+    if (cleanQuestion) {
+      try {
+        await addToMemory(sid, "user", cleanQuestion, DEFAULT_SHORT_MEMORY_SIZE);
+      } catch (err) {
+        console.error("Add user memory error:", err);
+      }
+    }
+
+    if (cleanText) {
+      try {
+        await addToMemory(sid, "assistant", cleanText, DEFAULT_SHORT_MEMORY_SIZE);
+      } catch (err) {
+        console.error("Add assistant memory error:", err);
+      }
+    }
 
     return res.json({
       sessionId: sid,
