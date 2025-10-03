@@ -212,7 +212,6 @@ app.post("/api/agent", async (req, res) => {
     let { question: rawQuestion, prompt, model_id, topk = 5, fileName, files, context, file_name } = req.body || {};
     let question = rawQuestion || prompt;
 
-    // fallback nếu không có prompt/question
     if (!question?.trim()) {
       if (Array.isArray(files) && files.length > 0) {
         if (files.length === 1) {
@@ -293,9 +292,8 @@ app.post("/api/agent", async (req, res) => {
 
     const memoryText = memoryEntries.map(m => `- [${m.role}] ${m.text}`).join("\n");
 
-    let filePromptSection = "";
-    if (fileContext && fileContext.trim().length > 0) {
-      filePromptSection = `Dưới đây là các file người dùng đã tải lên có liên quan:\n${fileContext}\n\n`;
+    if (fileContext.trim()) {
+      fileContext = `Dưới đây là các file người dùng đã tải lên có liên quan:\n${fileContext}\n\n`;
     }
 
     const promptText = `
@@ -305,7 +303,7 @@ ${memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n"
 Dưới đây là danh sách quỹ có liên quan:
 ${contextText}
 
-${filePromptSection}Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và đường dẫn.
+${fileContext}Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và đường dẫn. 
 Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy dữ liệu phù hợp".
 `;
 
@@ -351,6 +349,8 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       });
     } catch (e) {}
 
+    // nếu cần bạn có thể lưu memoryEntries vào DB (tùy bạn)
+
     return res.json({
       sessionId: sid,
       isNewSession,
@@ -360,12 +360,10 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       memory: { entries_count: memoryEntries.length },
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
-
   } catch (err) {
     return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
-
 
 if (!process.env.VERCEL) {
   (async () => {
