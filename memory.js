@@ -1,5 +1,3 @@
-// memory.js
-
 import { getDb } from "./db.js";
 
 const DEFAULT_COLLECTION = process.env.SESSION_COLLECTION || "fundsessions";
@@ -9,21 +7,22 @@ function normalizeSessionId(sessionId) {
   return sessionId ? String(sessionId).trim() : null;
 }
 
-/**
- * Lưu một message ngắn hạn vào memory session
- * @param {string} sessionId
- * @param {string} role - "user" | "assistant"
- * @param {string} text - nội dung message
- * @param {number} maxEntries - số lượng tối đa message lưu
- */
 export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MAX) {
   const sessionIdStr = normalizeSessionId(sessionId);
   if (!sessionIdStr) return;
-
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
 
   const entry = { role, text, createdAt: new Date() };
+
+  const doc = await col.findOne({ sessionId: sessionIdStr });
+
+  if (doc && !Array.isArray(doc.entries)) {
+    await col.updateOne(
+      { sessionId: sessionIdStr },
+      { $set: { entries: [] } }
+    );
+  }
 
   await col.updateOne(
     { sessionId: sessionIdStr },
@@ -35,16 +34,9 @@ export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MA
   );
 }
 
-/**
- * Lấy mảng các message ngắn hạn cho session
- * @param {string} sessionId
- * @param {number} limit - lấy tối đa bao nhiêu message
- * @returns {Array<{role: string, text: string, createdAt: Date}>}
- */
 export async function getMemory(sessionId, limit = DEFAULT_MAX) {
   const sessionIdStr = normalizeSessionId(sessionId);
   if (!sessionIdStr) return [];
-
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
 
@@ -52,18 +44,14 @@ export async function getMemory(sessionId, limit = DEFAULT_MAX) {
     { sessionId: sessionIdStr },
     { projection: { entries: 1 } }
   );
+
   if (!doc?.entries) return [];
   return doc.entries.slice(-limit);
 }
 
-/**
- * Xóa toàn bộ memory của một session
- * @param {string} sessionId
- */
 export async function clearMemory(sessionId) {
   const sessionIdStr = normalizeSessionId(sessionId);
   if (!sessionIdStr) return;
-
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
   await col.deleteOne({ sessionId: sessionIdStr });
