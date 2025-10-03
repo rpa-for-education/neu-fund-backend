@@ -1,37 +1,17 @@
-// --- file: memory.js ---
-// Simple short-term memory implemented on MongoDB.
-// Exports: addToMemory(sessionId, role, text), getMemory(sessionId, limit), clearMemory(sessionId)
-
 import { getDb } from "./db.js";
 
 const DEFAULT_COLLECTION = process.env.SESSION_COLLECTION || "fundsessions";
 const DEFAULT_MAX = parseInt(process.env.SHORT_MEMORY_SIZE || "5", 10);
 
-// đảm bảo index unique cho sessionId
-async function ensureIndexes(col) {
-  try {
-    // ép sessionId luôn là string
-    await col.updateMany(
-      { sessionId: { $type: "objectId" } },
-      [{ $set: { sessionId: { $toString: "$sessionId" } } }]
-    );
-
-    // tạo index unique (drop nếu đã tồn tại conflict)
-    const indexes = await col.indexes();
-    const hasSessionIdx = indexes.find((idx) => idx.key && idx.key.sessionId);
-    if (hasSessionIdx && !hasSessionIdx.unique) {
-      await col.dropIndex(hasSessionIdx.name);
-    }
-
-    await col.createIndex({ sessionId: 1 }, { unique: true });
-  } catch (err) {
-    console.error("⚠️ ensureIndexes failed:", err.message);
-  }
+function normalizeSessionId(sessionId) {
+  return sessionId ? String(sessionId).trim() : null;
 }
 
-function normalizeSessionId(sessionId) {
-  // Đảm bảo sessionId là một string duy nhất, loại bỏ ký tự trắng thừa
-  return sessionId ? String(sessionId).trim() : null;
+// Chạy 1 lần khi startup, không cần gọi đi gọi lại (bỏ trong các hàm bên dưới)
+export async function ensureIndexes() {
+  const db = await getDb();
+  const col = db.collection(DEFAULT_COLLECTION);
+  await col.createIndex({ sessionId: 1 });
 }
 
 export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MAX) {
@@ -40,18 +20,20 @@ export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MA
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
 
-  await ensureIndexes(col);
-
-  const entry = { role, text, createdAt: new Date() };
+  // Thêm entry vào cuối mảng entries
   await col.updateOne(
     { sessionId: sessionIdStr },
     {
       $setOnInsert: { createdAt: new Date(), sessionId: sessionIdStr },
-      $push: {
-        entries: { $each: [entry], $slice: -maxEntries },
-      },
+      $push: { entries: { role, text, createdAt: new Date() } }
     },
     { upsert: true }
+  );
+
+  // Cắt lại mảng entries chỉ lấy maxEntries phần cuối cùng
+  await col.updateOne(
+    { sessionId: sessionIdStr },
+    [ { $set: { entries: { $slice: ["$entries", -maxEntries] } } } ]
   );
 }
 
@@ -61,16 +43,12 @@ export async function getMemory(sessionId, limit = DEFAULT_MAX) {
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
 
-  await ensureIndexes(col);
-
   const doc = await col.findOne(
     { sessionId: sessionIdStr },
     { projection: { entries: 1 } }
   );
-
   if (!doc?.entries) return [];
-  const entries = Array.isArray(doc.entries) ? doc.entries.slice(-limit) : [];
-  return entries;
+  return doc.entries.slice(-limit);
 }
 
 export async function clearMemory(sessionId) {
@@ -78,8 +56,5 @@ export async function clearMemory(sessionId) {
   if (!sessionIdStr) return;
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
-
-  await ensureIndexes(col);
-
   await col.deleteOne({ sessionId: sessionIdStr });
 }
