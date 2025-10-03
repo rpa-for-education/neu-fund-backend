@@ -59,7 +59,6 @@ app.use(session({
 }));
 app.use(express.json({ limit: "10mb" }));
 
-// ========= FILE UPLOAD =========
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.post("/api/upload", upload.array("file"), async (req, res) => {
@@ -82,7 +81,6 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
       const prefix = userEmail || folder || "";
       const key = prefix ? `${prefix}/${uniqueName}` : uniqueName;
 
-      // Upload to MinIO
       await s3Client.send(
         new PutObjectCommand({
           Bucket: process.env.MINIO_BUCKET_NAME,
@@ -94,7 +92,6 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
 
       const fileUrl = `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}/${process.env.MINIO_BUCKET_NAME}/${key}`;
 
-      // Extract text
       let extractedText = "";
       if (ext === ".pdf") {
         const data = await pdfParse(file.buffer);
@@ -106,7 +103,6 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
         extractedText = file.buffer.toString("utf8");
       }
 
-      // Save embedding
       if (extractedText.trim()) {
         const embedding = await embedText(extractedText);
         await fileCol.insertOne({
@@ -128,7 +124,6 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
   }
 });
 
-// ========= HEALTH =========
 app.get("/api/health", async (_req, res) => {
   try {
     const db = await getDb();
@@ -147,7 +142,6 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
-// ========= FUNDS =========
 app.get("/api/funds", async (req, res) => {
   try {
     const { q } = req.query;
@@ -214,7 +208,6 @@ app.get("/api/funds", async (req, res) => {
   }
 });
 
-// ========= AGENT =========
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
   try {
@@ -234,7 +227,6 @@ app.post("/api/agent", async (req, res) => {
     let { question: rawQuestion, prompt, model_id, topk = 5, fileName, files } = req.body || {};
     let question = rawQuestion || prompt;
 
-    // fallback nếu không có prompt/question
     if (!question?.trim()) {
       if (Array.isArray(files) && files.length > 0) {
         if (files.length === 1) {
@@ -262,7 +254,6 @@ app.post("/api/agent", async (req, res) => {
         ({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest
       );
 
-      // Search in uploaded files
       const queryVec = await embedText(question);
       fileHits = await fileCol
         .aggregate([
@@ -361,6 +352,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     } catch (_) {}
 
     const response_time_ms = Date.now() - startedAt;
+
     try {
       await fundlogs.insertOne({
         question,
@@ -379,13 +371,11 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       });
     } catch (e) {}
 
-    // Bổ sung xử lý lưu vào memory an toàn dùng updateOne + $push để tránh lỗi duplicate key
     const cleanQuestion = question ? String(question).trim() : "";
     const cleanText = text ? String(text).trim() : "";
 
     if (cleanQuestion) {
       try {
-        // Dùng updateOne push vào mảng entries
         await addToMemory(sid, "user", cleanQuestion, DEFAULT_SHORT_MEMORY_SIZE);
       } catch (err) {
         console.error("Add user memory error:", err);
@@ -413,6 +403,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
     return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
+
 
 if (!process.env.VERCEL) {
   (async () => {

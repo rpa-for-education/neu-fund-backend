@@ -15,15 +15,18 @@ export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MA
 
   const entry = { role, text, createdAt: new Date() };
 
+  // Bước 1: Lấy document hiện tại
   const doc = await col.findOne({ sessionId: sessionIdStr });
 
+  // Nếu tồn tại và entries không phải là mảng, chuẩn hóa về mảng rỗng
   if (doc && !Array.isArray(doc.entries)) {
     await col.updateOne(
       { sessionId: sessionIdStr },
-      { $set: { entries: [] } }
+      [{ $set: { entries: { $cond: [{ $isArray: "$entries" }, "$entries", []] } } }]
     );
   }
 
+  // Bước 2: Push message mới vào mảng entries, upsert True
   await col.updateOne(
     { sessionId: sessionIdStr },
     {
