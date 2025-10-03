@@ -1,3 +1,6 @@
+// --- memory.js ---
+// Best-practice short-term memory: mỗi message thành 1 document
+
 import { getDb } from "./db.js";
 
 const DEFAULT_COLLECTION = process.env.SESSION_COLLECTION || "fundsessions";
@@ -7,54 +10,48 @@ function normalizeSessionId(sessionId) {
   return sessionId ? String(sessionId).trim() : null;
 }
 
-// Chạy 1 lần khi startup, không cần gọi đi gọi lại (bỏ trong các hàm bên dưới)
-export async function ensureIndexes() {
-  const db = await getDb();
-  const col = db.collection(DEFAULT_COLLECTION);
-  await col.createIndex({ sessionId: 1 });
-}
-
+// Lưu 1 message vào memory. Tự động giới hạn số entry theo maxEntries.
 export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MAX) {
   const sessionIdStr = normalizeSessionId(sessionId);
   if (!sessionIdStr) return;
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
 
-  // Thêm entry vào cuối mảng entries
-  await col.updateOne(
-    { sessionId: sessionIdStr },
-    {
-      $setOnInsert: { createdAt: new Date(), sessionId: sessionIdStr },
-      $push: { entries: { role, text, createdAt: new Date() } }
-    },
-    { upsert: true }
-  );
+  // Insert bản ghi mới
+  await col.insertOne({ sessionId: sessionIdStr, role, text, createdAt: new Date() });
 
-  // Cắt lại mảng entries chỉ lấy maxEntries phần cuối cùng
-  await col.updateOne(
-    { sessionId: sessionIdStr },
-    [ { $set: { entries: { $slice: ["$entries", -maxEntries] } } } ]
-  );
+  // Xoá bản ghi cũ nếu vượt quá maxEntries
+  const count = await col.countDocuments({ sessionId: sessionIdStr });
+  if (count > maxEntries) {
+    const old = await col.find({ sessionId: sessionIdStr })
+      .sort({ createdAt: 1 })
+      .limit(count - maxEntries)
+      .project({ _id: 1 }).toArray();
+    if (old.length > 0) {
+      await col.deleteMany({ _id: { $in: old.map(e => e._id) } });
+    }
+  }
 }
 
+// Lấy context hội thoại gần nhất cho sessionId
 export async function getMemory(sessionId, limit = DEFAULT_MAX) {
   const sessionIdStr = normalizeSessionId(sessionId);
   if (!sessionIdStr) return [];
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
 
-  const doc = await col.findOne(
-    { sessionId: sessionIdStr },
-    { projection: { entries: 1 } }
-  );
-  if (!doc?.entries) return [];
-  return doc.entries.slice(-limit);
+  return await col.find({ sessionId: sessionIdStr })
+    .sort({ createdAt: 1 })
+    .limit(limit)
+    .project({ _id: 0, role: 1, text: 1, createdAt: 1 })
+    .toArray();
 }
 
+// Xoá toàn bộ memory theo sessionId
 export async function clearMemory(sessionId) {
   const sessionIdStr = normalizeSessionId(sessionId);
   if (!sessionIdStr) return;
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
-  await col.deleteOne({ sessionId: sessionIdStr });
+  await col.deleteMany({ sessionId: sessionIdStr });
 }
