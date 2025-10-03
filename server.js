@@ -334,6 +334,8 @@ Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và 
 Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy dữ liệu phù hợp".
     `;
 
+    console.log("=== PROMPT ===\n", promptText, "\n=== END PROMPT ===");
+
     const llmRes = await callLLM(promptText, resolvedModel);
 
     let text = "";
