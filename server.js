@@ -22,6 +22,7 @@ const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
 const FILES_COLLECTION = process.env.FILES_COLLECTION || "uploaded_files";
 const DEFAULT_LIMIT_FUND = 100;
 const DEFAULT_SHORT_MEMORY_SIZE = 10;
+const MAX_SHORT_HISTORY = 5; // số cặp hỏi/đáp tối đa lấy từ context history
 
 function formatAnswerText(rawText) {
   if (!rawText) return "";
@@ -223,9 +224,10 @@ app.post("/api/agent", async (req, res) => {
       isNewSession = true;
     }
 
-    let { question: rawQuestion, prompt, model_id, topk = 5, fileName, files } = req.body || {};
+    let { question: rawQuestion, prompt, model_id, topk = 5, fileName, files, context, file_name } = req.body || {};
     let question = rawQuestion || prompt;
 
+    // fallback nếu không có prompt/question
     if (!question?.trim()) {
       if (Array.isArray(files) && files.length > 0) {
         if (files.length === 1) {
@@ -246,6 +248,7 @@ app.post("/api/agent", async (req, res) => {
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
     let fileHits = [];
+    let fileContext = "";
 
     try {
       hits = await fundVectorSearch(question, k);
@@ -254,8 +257,17 @@ app.post("/api/agent", async (req, res) => {
       );
 
       const queryVec = await embedText(question);
-      fileHits = await fileCol
-        .aggregate([
+
+      // Nếu có files trong req.body.file_name thì load tạm và tìm kiếm tương tự
+      if (Array.isArray(file_name) && file_name.length > 0) {
+        // Lấy dữ liệu các file đã up (bằng url hoặc tên), tìm từ DB Files collection
+        const foundFiles = await fileCol.find({ url: { $in: file_name } }).toArray();
+        fileContext = foundFiles
+          .map((f, i) => `${i + 1}. ${f.name} - ${f.url}`)
+          .join("\n");
+
+        // Lấy embedding file queryVec dùng để tính tương đồng trong fileCol
+        fileHits = await fileCol.aggregate([
           {
             $addFields: {
               similarity: {
@@ -265,36 +277,38 @@ app.post("/api/agent", async (req, res) => {
                       $reduce: {
                         input: { $range: [0, { $size: "$vector" }] },
                         initialValue: 0,
-                        in: {
-                          $add: [
-                            "$$value",
-                            { $multiply: [queryVec["$$this"], "$vector.$$this"] },
-                          ],
-                        },
-                      },
-                    },
+                        in: { $add: ["$$value", { $multiply: [queryVec["$$this"], "$vector.$$this"] }] }
+                      }
+                    }
                   },
-                  in: "$$dot",
-                },
+                  in: "$$dot"
+                }
               },
-            },
+            }
           },
+          { $match: { url: { $in: file_name } } },
           { $sort: { similarity: -1 } },
-          { $limit: k },
-        ])
-        .toArray();
+          { $limit: k }
+        ]).toArray();
+      } else {
+        // Nếu không có file thì tìm kiếm bình thường trong fileCol (fileHits để trống)
+        fileHits = [];
+        fileContext = "";
+      }
     } catch (e) {
       hits = [];
       fileHits = [];
+      fileContext = "";
     }
 
+    // Lấy short-term memory từ context.history, 5 cặp hỏi-đáp cuối
     let memoryEntries = [];
-    try {
-      memoryEntries = await getMemory(sid, DEFAULT_SHORT_MEMORY_SIZE);
-      console.log("Memory entries retrieved:", memoryEntries);
-    } catch (e) {
-      memoryEntries = [];
-      console.error("Get memory error:", e);
+    if (Array.isArray(context?.history)) {
+      const recentHistory = context.history.slice(-MAX_SHORT_HISTORY * 2);
+      memoryEntries = recentHistory.map(entry => ({
+        role: entry.role || "user",
+        text: entry.text || ""
+      })).filter(m => m.text.trim().length > 0);
     }
 
     const contextText = hits
@@ -304,14 +318,14 @@ app.post("/api/agent", async (req, res) => {
       )
       .join("\n");
 
-    const fileContext = fileHits
-      .map((f, i) => `${i + 1}. ${f.name} - ${f.url}`)
+    const memoryText = memoryEntries
+      .map(m => `- [${m.role}] ${m.text}`)
       .join("\n");
 
-    const memoryText = memoryEntries
-      .filter(m => m && typeof m.role === "string" && typeof m.text === "string")
-      .map((m) => `- [${m.role}] ${m.text}`)
-      .join("\n");
+    let filePromptSection = "";
+    if (fileContext && fileContext.trim().length > 0) {
+      filePromptSection = `Dưới đây là các file người dùng đã tải lên có liên quan:\n${fileContext}\n\n`;
+    }
 
     const promptText = `
 Người dùng hỏi: "${question}"
@@ -320,10 +334,7 @@ ${memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n"
 Dưới đây là danh sách quỹ có liên quan:
 ${contextText}
 
-Dưới đây là các file người dùng đã tải lên có liên quan:
-${fileContext}
-
-Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và đường dẫn. 
+${filePromptSection}Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và đường dẫn. 
 Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy dữ liệu phù hợp".
 `;
 
@@ -333,17 +344,16 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
 
     let text = "";
     let provider = null;
-    if (typeof llmRes === "string") text = llmRes;
-    else if (llmRes && typeof llmRes === "object") {
+    if (typeof llmRes === "string") {
+      text = llmRes;
+    } else if (llmRes && typeof llmRes === "object") {
       text = llmRes.answer ?? llmRes.text ?? llmRes.content ?? "";
       provider = llmRes.provider ?? null;
     }
 
     text = formatAnswerText(text);
 
-    let prompt_tokens = null,
-      answer_tokens = null,
-      tokens_used = null;
+    let prompt_tokens = null, answer_tokens = null, tokens_used = null;
     try {
       prompt_tokens = encode(promptText).length;
       answer_tokens = encode(text).length;
@@ -370,24 +380,17 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       });
     } catch (e) {}
 
+    // Lưu memory nếu muốn (giữ code này hoặc comment)
+    /*
     const cleanQuestion = question ? String(question).trim() : "";
     const cleanText = text ? String(text).trim() : "";
-
     if (cleanQuestion) {
-      try {
-        await addToMemory(sid, "user", cleanQuestion, DEFAULT_SHORT_MEMORY_SIZE);
-      } catch (err) {
-        console.error("Add user memory error:", err);
-      }
+      await addToMemory(sid, "user", cleanQuestion, DEFAULT_SHORT_MEMORY_SIZE);
     }
-
     if (cleanText) {
-      try {
-        await addToMemory(sid, "assistant", cleanText, DEFAULT_SHORT_MEMORY_SIZE);
-      } catch (err) {
-        console.error("Add assistant memory error:", err);
-      }
+      await addToMemory(sid, "assistant", cleanText, DEFAULT_SHORT_MEMORY_SIZE);
     }
+    */
 
     return res.json({
       sessionId: sid,
@@ -398,10 +401,12 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       memory: { entries_count: memoryEntries.length },
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
+
   } catch (err) {
     return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
+
 
 if (!process.env.VERCEL) {
   (async () => {
