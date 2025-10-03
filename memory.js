@@ -1,5 +1,4 @@
-// --- memory.js ---
-// Best-practice short-term memory: mỗi message thành 1 document
+// memory.js
 
 import { getDb } from "./db.js";
 
@@ -10,17 +9,17 @@ function normalizeSessionId(sessionId) {
   return sessionId ? String(sessionId).trim() : null;
 }
 
-// Lưu 1 message vào memory. Tự động giới hạn số entry theo maxEntries.
+// Lưu 1 message mới
 export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MAX) {
   const sessionIdStr = normalizeSessionId(sessionId);
   if (!sessionIdStr) return;
   const db = await getDb();
   const col = db.collection(DEFAULT_COLLECTION);
 
-  // Insert bản ghi mới
+  // Insert document mới (mỗi message một document)
   await col.insertOne({ sessionId: sessionIdStr, role, text, createdAt: new Date() });
 
-  // Xoá bản ghi cũ nếu vượt quá maxEntries
+  // Xóa bản ghi cũ nếu vượt quá giới hạn maxEntries
   const count = await col.countDocuments({ sessionId: sessionIdStr });
   if (count > maxEntries) {
     const old = await col.find({ sessionId: sessionIdStr })
@@ -33,7 +32,7 @@ export async function addToMemory(sessionId, role, text, maxEntries = DEFAULT_MA
   }
 }
 
-// Lấy context hội thoại gần nhất cho sessionId
+// Lấy các message gần nhất cho session
 export async function getMemory(sessionId, limit = DEFAULT_MAX) {
   const sessionIdStr = normalizeSessionId(sessionId);
   if (!sessionIdStr) return [];
@@ -47,7 +46,7 @@ export async function getMemory(sessionId, limit = DEFAULT_MAX) {
     .toArray();
 }
 
-// Xoá toàn bộ memory theo sessionId
+// Xóa toàn bộ memory của session
 export async function clearMemory(sessionId) {
   const sessionIdStr = normalizeSessionId(sessionId);
   if (!sessionIdStr) return;
