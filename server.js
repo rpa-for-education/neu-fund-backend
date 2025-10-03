@@ -326,19 +326,16 @@ app.post("/api/agent", async (req, res) => {
     const promptText = `
 Người dùng hỏi: "${question}"
 
-
 ${memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n" : ""}
 Dưới đây là danh sách quỹ có liên quan:
 ${contextText}
 
-
 Dưới đây là các file người dùng đã tải lên có liên quan:
 ${fileContext}
 
-
 Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và đường dẫn. 
 Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy dữ liệu phù hợp".
-    `;
+`;
 
     console.log("=== PROMPT ===\n", promptText, "\n=== END PROMPT ===");
 
@@ -382,12 +379,13 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       });
     } catch (e) {}
 
-    // Bổ sung xử lý lưu vào memory an toàn (chuyển sang string, thêm try-catch)
+    // Bổ sung xử lý lưu vào memory an toàn dùng updateOne + $push để tránh lỗi duplicate key
     const cleanQuestion = question ? String(question).trim() : "";
     const cleanText = text ? String(text).trim() : "";
 
     if (cleanQuestion) {
       try {
+        // Dùng updateOne push vào mảng entries
         await addToMemory(sid, "user", cleanQuestion, DEFAULT_SHORT_MEMORY_SIZE);
       } catch (err) {
         console.error("Add user memory error:", err);
