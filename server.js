@@ -224,7 +224,7 @@ app.post("/api/agent", async (req, res) => {
 
     console.log(req.body);
     
-    const sid = req.sessionID;
+    const sid = req.session_id;
     let isNewSession = false;
     if (!req.session.isInitialized) {
       req.session.isInitialized = true;
