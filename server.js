@@ -6,6 +6,7 @@ import multer from "multer";
 import fs from "fs";
 import pdfParse from "pdf-parse/lib/pdf-parse.js";
 import mammoth from "mammoth";
+import fetch from "node-fetch"; // ✅ thêm fetch để tải file từ link
 
 import { ObjectId } from "mongodb";
 import { callLLM } from "./llm.js";
@@ -240,33 +241,52 @@ app.post("/api/agent", async (req, res) => {
 
       const queryVec = await embedText(question);
 
+      // ✅ THÊM XỬ LÝ FILE LINK Ở ĐÂY
       if (Array.isArray(file_name) && file_name.length > 0) {
+        for (const link of file_name) {
+          const existing = await fileCol.findOne({ url: link });
+          if (!existing) {
+            try {
+              const resp = await fetch(link);
+              const buffer = Buffer.from(await resp.arrayBuffer());
+              const ext = link.toLowerCase().endsWith(".pdf")
+                ? ".pdf"
+                : link.toLowerCase().endsWith(".docx")
+                ? ".docx"
+                : ".txt";
+              let extractedText = "";
+              if (ext === ".pdf") {
+                const data = await pdfParse(buffer);
+                extractedText = data.text;
+              } else if (ext === ".docx") {
+                const { value } = await mammoth.extractRawText({ buffer });
+                extractedText = value;
+              } else {
+                extractedText = buffer.toString("utf8");
+              }
+              if (extractedText.trim()) {
+                const embedding = await embedText(extractedText);
+                await fileCol.insertOne({
+                  name: link.split("/").pop(),
+                  url: link,
+                  text: extractedText,
+                  vector: embedding,
+                  uploadedAt: new Date(),
+                });
+              }
+            } catch (fetchErr) {
+              console.error("❌ Không thể đọc file link:", link, fetchErr);
+            }
+          }
+        }
+
         const foundFiles = await fileCol.find({ url: { $in: file_name } }).toArray();
         fileContext = foundFiles.map((f, i) => `${i + 1}. ${f.name} - ${f.url}`).join("\n");
 
-        fileHits = await fileCol.aggregate([
-          {
-            $addFields: {
-              similarity: {
-                $let: {
-                  vars: {
-                    dot: {
-                      $reduce: {
-                        input: { $range: [0, { $size: "$vector" }] },
-                        initialValue: 0,
-                        in: { $add: ["$$value", { $multiply: [queryVec["$$this"], "$vector.$$this"] }] },
-                      },
-                    },
-                  },
-                  in: "$$dot",
-                },
-              },
-            },
-          },
-          { $match: { url: { $in: file_name } } },
-          { $sort: { similarity: -1 } },
-          { $limit: k }
-        ]).toArray();
+        fileHits = await fileCol
+          .find({ url: { $in: file_name } })
+          .limit(k)
+          .toArray();
       } else {
         fileHits = [];
         fileContext = "";
