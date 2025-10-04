@@ -1,3 +1,4 @@
+// server.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -53,25 +54,30 @@ async function Funds() {
 
 const app = express();
 app.use(cors());
-app.use(session({
-  secret: process.env.SESSION_SECRET || "fitneu2025",
-  resave: false,
-  saveUninitialized: true,
-  cookie: { secure: false }
-}));
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET || "fitneu2025",
+    resave: false,
+    saveUninitialized: true,
+    cookie: { secure: false },
+  })
+);
 app.use(express.json({ limit: "10mb" }));
 
 const upload = multer({ storage: multer.memoryStorage() });
 
+// ============================= UPLOAD FILE API =============================
 app.post("/api/upload", upload.array("file"), async (req, res) => {
   try {
     const { folder, userEmail } = req.body;
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: "No file uploaded" });
     }
+
     const db = await getDb();
     const fileCol = db.collection(FILES_COLLECTION);
     const uploadedUrls = [];
+
     for (const file of req.files) {
       const parts = file.originalname.split(".");
       const ext = parts.length > 1 ? "." + parts.pop().toLowerCase() : "";
@@ -80,6 +86,7 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
       const uniqueName = `${baseName}_${timestamp}${ext}`;
       const prefix = userEmail || folder || "";
       const key = prefix ? `${prefix}/${uniqueName}` : uniqueName;
+
       await s3Client.send(
         new PutObjectCommand({
           Bucket: process.env.MINIO_BUCKET_NAME,
@@ -88,7 +95,9 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
           ContentType: file.mimetype,
         })
       );
+
       const fileUrl = `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}/${process.env.MINIO_BUCKET_NAME}/${key}`;
+
       let extractedText = "";
       if (ext === ".pdf") {
         const data = await pdfParse(file.buffer);
@@ -99,6 +108,7 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
       } else if (ext === ".txt") {
         extractedText = file.buffer.toString("utf8");
       }
+
       if (extractedText.trim()) {
         const embedding = await embedText(extractedText);
         await fileCol.insertOne({
@@ -109,8 +119,10 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
           uploadedAt: new Date(),
         });
       }
+
       uploadedUrls.push(fileUrl);
     }
+
     res.json({ status: "success", files: uploadedUrls });
   } catch (err) {
     console.error("❌ Upload error:", err);
@@ -118,6 +130,7 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
   }
 });
 
+// ============================= HEALTH CHECK =============================
 app.get("/api/health", async (_req, res) => {
   try {
     const db = await getDb();
@@ -136,6 +149,7 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
+// ============================= GET FUNDS =============================
 app.get("/api/funds", async (req, res) => {
   try {
     const { q } = req.query;
@@ -146,21 +160,26 @@ app.get("/api/funds", async (req, res) => {
       "_key",
     ]);
     const col = await Funds();
+
     if (!limit) {
       res.writeHead(200, {
         "Content-Type": "application/json; charset=utf-8",
       });
+
       const cursor = col
         .find(filter, {
           projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 },
         })
         .sort({ POSTED_DATE: -1 })
         .limit(DEFAULT_LIMIT_FUND);
+
       const total = await col.countDocuments(filter);
       let first = true;
+
       res.write(
         `{"page":1,"limit":${DEFAULT_LIMIT_FUND},"total":${total},"items":[`
       );
+
       await cursor.forEach((doc) => {
         const mapped = {
           name: doc["OPPORTUNITY TITLE"],
@@ -170,6 +189,7 @@ app.get("/api/funds", async (req, res) => {
         res.write(JSON.stringify(mapped));
         first = false;
       });
+
       res.write("]}");
       res.end();
     } else {
@@ -178,14 +198,17 @@ app.get("/api/funds", async (req, res) => {
           projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 },
         })
         .sort({ POSTED_DATE: -1 });
+
       const [items, total] = await Promise.all([
         cursor.skip(skip).limit(limit).toArray(),
         col.countDocuments(filter),
       ]);
+
       const mappedItems = items.map((doc) => ({
         name: doc["OPPORTUNITY TITLE"],
         url: doc["OPPORTUNITY URL"],
       }));
+
       res.json({ page, limit, total, items: mappedItems });
     }
   } catch (err) {
@@ -194,8 +217,10 @@ app.get("/api/funds", async (req, res) => {
   }
 });
 
+// ============================= AGENT HANDLER =============================
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
+
   try {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
@@ -210,16 +235,25 @@ app.post("/api/agent", async (req, res) => {
       isNewSession = true;
     }
 
-    let { question: rawQuestion, prompt, model_id, topk = 5, fileName, files, context, file_name } = req.body || {};
+    let {
+      question: rawQuestion,
+      prompt,
+      model_id,
+      topk = 5,
+      fileName,
+      files,
+      context,
+      file_name,
+    } = req.body || {};
+
     let question = rawQuestion || prompt;
 
     if (!question?.trim()) {
       if (Array.isArray(files) && files.length > 0) {
-        if (files.length === 1) {
-          question = `Hãy đọc nội dung của file ${files[0]}`;
-        } else {
-          question = `Hãy đọc nội dung các file: ${files.join(", ")}`;
-        }
+        question =
+          files.length === 1
+            ? `Hãy đọc nội dung của file ${files[0]}`
+            : `Hãy đọc nội dung các file: ${files.join(", ")}`;
       } else if (fileName) {
         question = `Hãy đọc nội dung của file ${fileName}`;
       }
@@ -237,23 +271,27 @@ app.post("/api/agent", async (req, res) => {
 
     try {
       hits = await fundVectorSearch(question, k);
-      hits = hits.map(({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest);
+      hits = hits.map(
+        ({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest
+      );
 
       const queryVec = await embedText(question);
 
-      // ✅ THÊM XỬ LÝ FILE LINK Ở ĐÂY
+      // ✅ XỬ LÝ FILE LINK
       if (Array.isArray(file_name) && file_name.length > 0) {
         for (const link of file_name) {
           const existing = await fileCol.findOne({ url: link });
           if (!existing) {
             try {
               const resp = await fetch(link);
+              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
               const buffer = Buffer.from(await resp.arrayBuffer());
               const ext = link.toLowerCase().endsWith(".pdf")
                 ? ".pdf"
                 : link.toLowerCase().endsWith(".docx")
                 ? ".docx"
                 : ".txt";
+
               let extractedText = "";
               if (ext === ".pdf") {
                 const data = await pdfParse(buffer);
@@ -264,6 +302,7 @@ app.post("/api/agent", async (req, res) => {
               } else {
                 extractedText = buffer.toString("utf8");
               }
+
               if (extractedText.trim()) {
                 const embedding = await embedText(extractedText);
                 await fileCol.insertOne({
@@ -280,13 +319,15 @@ app.post("/api/agent", async (req, res) => {
           }
         }
 
-        const foundFiles = await fileCol.find({ url: { $in: file_name } }).toArray();
-        fileContext = foundFiles.map((f, i) => `${i + 1}. ${f.name} - ${f.url}`).join("\n");
-
-        fileHits = await fileCol
+        const foundFiles = await fileCol
           .find({ url: { $in: file_name } })
-          .limit(k)
           .toArray();
+
+        fileContext = foundFiles
+          .map((f, i) => `${i + 1}. ${f.name} - ${f.url}`)
+          .join("\n");
+
+        fileHits = foundFiles.slice(0, k);
       } else {
         fileHits = [];
         fileContext = "";
@@ -303,18 +344,28 @@ app.post("/api/agent", async (req, res) => {
       req.body.chat_history.forEach((entry, idx) => {
         console.log(`[${idx}] role: ${entry.role}, content: ${entry.content}`);
       });
+
       const recentHistory = req.body.chat_history.slice(-MAX_SHORT_HISTORY * 2);
-      memoryEntries = recentHistory.map(entry => ({
-        role: entry.role || "user",
-        text: entry.content || ""
-      })).filter(m => m.text.trim().length > 0);
+      memoryEntries = recentHistory
+        .map((entry) => ({
+          role: entry.role || "user",
+          text: entry.content || "",
+        }))
+        .filter((m) => m.text.trim().length > 0);
     }
 
-    const contextText = hits.map((f, i) =>
-      `${i + 1}. ${f["OPPORTUNITY TITLE"] || ""} - ${f["AGENCY NAME"] || ""} - ${f["OPPORTUNITY URL"] || ""}`
-    ).join("\n");
+    const contextText = hits
+      .map(
+        (f, i) =>
+          `${i + 1}. ${f["OPPORTUNITY TITLE"] || ""} - ${
+            f["AGENCY NAME"] || ""
+          } - ${f["OPPORTUNITY URL"] || ""}`
+      )
+      .join("\n");
 
-    const memoryText = memoryEntries.map(m => `- [${m.role}] ${m.text}`).join("\n");
+    const memoryText = memoryEntries
+      .map((m) => `- [${m.role}] ${m.text}`)
+      .join("\n");
 
     if (fileContext.trim()) {
       fileContext = `Dưới đây là các file người dùng đã tải lên có liên quan:\n${fileContext}\n\n`;
@@ -346,12 +397,14 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
 
     text = formatAnswerText(text);
 
-    let prompt_tokens = null, answer_tokens = null, tokens_used = null;
+    let prompt_tokens = null,
+      answer_tokens = null,
+      tokens_used = null;
     try {
       prompt_tokens = encode(promptText).length;
       answer_tokens = encode(text).length;
       tokens_used = prompt_tokens + answer_tokens;
-    } catch (_) { }
+    } catch (_) {}
 
     const response_time_ms = Date.now() - startedAt;
 
@@ -371,7 +424,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
         meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
         createdAt: new Date(),
       });
-    } catch (e) { }
+    } catch (e) {}
 
     return res.json({
       sessionId: sid,
@@ -382,12 +435,12 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       memory: { entries_count: memoryEntries.length },
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
-
   } catch (err) {
     return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
 
+// ============================= SERVER STARTUP =============================
 if (!process.env.VERCEL) {
   (async () => {
     try {
