@@ -278,12 +278,12 @@ app.post("/api/agent", async (req, res) => {
     }
 
     let memoryEntries = [];
-    if (Array.isArray(req.body.history_chat)) {
-      console.log("DEBUG history_chat:");
-      req.body.history_chat.forEach((entry, idx) => {
+    if (Array.isArray(req.body.chat_history)) {
+      console.log("DEBUG chat_history:");
+      req.body.chat_history.forEach((entry, idx) => {
         console.log(`[${idx}] role: ${entry.role}, content: ${entry.content}`);
       });
-      const recentHistory = req.body.history_chat.slice(-MAX_SHORT_HISTORY * 2);
+      const recentHistory = req.body.chat_history.slice(-MAX_SHORT_HISTORY * 2);
       memoryEntries = recentHistory.map(entry => ({
         role: entry.role || "user",
         text: entry.content || ""
