@@ -279,68 +279,70 @@ app.post("/api/agent", async (req, res) => {
       const queryVec = await embedText(question);
 
       // ✅ XỬ LÝ FILE LINK
-      if (Array.isArray(file_name) && file_name.length > 0) {
-        for (const link of file_name) {
-          const existing = await fileCol.findOne({ url: link });
-          if (!existing) {
-            try {
-              console.log("📄 Đang tải file:", link);
-              const resp = await fetch(link);
-              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      try {
+        if (Array.isArray(file_name) && file_name.length > 0) {
+          for (const link of file_name) {
+            const existing = await fileCol.findOne({ url: link });
+            if (!existing) {
+              try {
+                console.log("📄 Đang tải file:", link);
+                const resp = await fetch(link);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
-              const buffer = Buffer.from(await resp.arrayBuffer());
-              const ext = link.toLowerCase().endsWith(".pdf")
-                ? ".pdf"
-                : link.toLowerCase().endsWith(".docx")
-                ? ".docx"
-                : ".txt";
+                const buffer = Buffer.from(await resp.arrayBuffer());
+                const ext = link.toLowerCase().endsWith(".pdf")
+                  ? ".pdf"
+                  : link.toLowerCase().endsWith(".docx")
+                  ? ".docx"
+                  : ".txt";
 
-              let extractedText = "";
+                let extractedText = "";
 
-              if (ext === ".pdf") {
-                const data = await pdfParse(buffer);
-                extractedText = data.text;
-              } else if (ext === ".docx") {
-                const { value } = await mammoth.extractRawText({ buffer });
-                extractedText = value;
-              } else {
-                extractedText = buffer.toString("utf8");
+                if (ext === ".pdf") {
+                  const data = await pdfParse(buffer);
+                  extractedText = data.text;
+                } else if (ext === ".docx") {
+                  const { value } = await mammoth.extractRawText({ buffer });
+                  extractedText = value;
+                } else {
+                  extractedText = buffer.toString("utf8");
+                }
+
+                if (extractedText.trim()) {
+                  const embedding = await embedText(extractedText);
+                  await fileCol.insertOne({
+                    name: link.split("/").pop(),
+                    url: link,
+                    text: extractedText,
+                    vector: embedding,
+                    uploadedAt: new Date(),
+                  });
+                }
+              } catch (fetchErr) {
+                console.error("❌ Không thể đọc file link:", link, fetchErr);
               }
-
-              // 🧠 Log kiểm tra nội dung đọc được
-              console.log("📜 Trích xuất nội dung:", extractedText.slice(0, 200), "...");
-
-              if (extractedText.trim()) {
-                const embedding = await embedText(extractedText);
-                await fileCol.insertOne({
-                  name: link.split("/").pop(),
-                  url: link,
-                  text: extractedText,
-                  vector: embedding,
-                  uploadedAt: new Date(),
-                });
-              }
-            } catch (fetchErr) {
-              console.error("❌ Không thể đọc file link:", link, fetchErr);
             }
           }
+
+          const foundFiles = await fileCol
+            .find({ url: { $in: file_name } })
+            .toArray();
+
+          fileContext = foundFiles
+            .map((f, i) => `${i + 1}. ${f.name} - ${f.url}`)
+            .join("\n");
+
+          fileHits = foundFiles.slice(0, k);
+        } else {
+          fileHits = [];
+          fileContext = "";
         }
-
-        const foundFiles = await fileCol
-          .find({ url: { $in: file_name } })
-          .toArray();
-
-        fileContext = foundFiles
-          .map((f, i) => `${i + 1}. ${f.name} - ${f.url}`)
-          .join("\n");
-
-        fileHits = foundFiles.slice(0, k);
-      } else {
+      } catch (e) {
+        hits = [];
         fileHits = [];
         fileContext = "";
       }
-
-
+      
     let memoryEntries = [];
     if (Array.isArray(req.body.chat_history)) {
       console.log("DEBUG chat_history:");
