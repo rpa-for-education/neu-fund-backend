@@ -1,7 +1,15 @@
-// search.js
+// ✅ Cho phép cache model trong thư mục ghi được của Vercel
+process.env.TRANSFORMERS_CACHE = "/tmp";
+process.env.HF_HUB_CACHE = "/tmp";
+
 import { pipeline } from "@xenova/transformers";
 import { getDb } from "./db.js";
 import fs from "fs/promises";
+import fsSync from "fs";
+import path from "path";
+import fetch from "node-fetch";
+import pdfParse from "pdf-parse/lib/pdf-parse.js";
+import mammoth from "mammoth";
 
 const MAX_TOPK = parseInt(process.env.MAX_TOPK || "30", 10);
 const VECTOR_INDEX_NAME = process.env.VECTOR_INDEX_FUND || "vector_index_fund";
@@ -26,8 +34,6 @@ export async function initEmbedding() {
 
 /**
  * Sinh vector embedding từ text
- * @param {string} text
- * @returns {Promise<number[]>}
  */
 async function embed(text) {
   if (!embedder) await initEmbedding();
@@ -35,35 +41,68 @@ async function embed(text) {
   return Array.from(out.data);
 }
 
-/**
- * Alias export để khớp với server.js
- */
 export async function embedText(text) {
   return embed(text);
 }
 
 /**
- * Upload file → đọc nội dung → nhúng → lưu MongoDB
- * @param {string} filePath
- * @returns {Promise<{insertedId}>}
+ * Đọc nội dung từ file hoặc link tải về
+ * - Hỗ trợ PDF, DOCX, TXT, và URL
  */
-export async function uploadAndIndexFile(filePath) {
+export async function readFileContent(inputPathOrUrl) {
+  let filePath = inputPathOrUrl;
+  let buffer;
+
+  // Nếu là URL thì tải về /tmp
+  if (inputPathOrUrl.startsWith("http://") || inputPathOrUrl.startsWith("https://")) {
+    const response = await fetch(inputPathOrUrl);
+    if (!response.ok) throw new Error(`❌ Không tải được file từ URL: ${inputPathOrUrl}`);
+    buffer = Buffer.from(await response.arrayBuffer());
+    const filename = `/tmp/${Date.now()}_${path.basename(new URL(inputPathOrUrl).pathname)}`;
+    await fs.writeFile(filename, buffer);
+    filePath = filename;
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+
+  if (ext === ".pdf") {
+    const dataBuffer = buffer || (await fs.readFile(filePath));
+    const pdfData = await pdfParse(dataBuffer);
+    return pdfData.text.trim();
+  }
+
+  if (ext === ".docx") {
+    const dataBuffer = buffer || (await fs.readFile(filePath));
+    const result = await mammoth.extractRawText({ buffer: dataBuffer });
+    return result.value.trim();
+  }
+
+  // Mặc định đọc text
+  const text = await fs.readFile(filePath, "utf8");
+  return text.trim();
+}
+
+/**
+ * Upload file → đọc nội dung → nhúng → lưu MongoDB
+ */
+export async function uploadAndIndexFile(filePathOrUrl) {
   const db = await getDb();
   const col = db.collection(MONGO_COLLECTION);
 
-  // Đọc file
-  const content = await fs.readFile(filePath, "utf8");
+  // ✅ Đọc nội dung
+  const content = await readFileContent(filePathOrUrl);
   if (!content || !content.trim()) {
     throw new Error("❌ File rỗng hoặc không đọc được nội dung.");
   }
 
-  // Sinh vector
+  // ✅ Sinh vector
   const vector = await embed(content);
 
-  // Lưu vào Mongo
+  // ✅ Lưu vào Mongo
   const doc = {
-    text: content,
+    text: content.slice(0, 5000), // Giới hạn nội dung lưu (tối đa 5k ký tự)
     [VECTOR_PATH]: vector,
+    source: filePathOrUrl,
     createdAt: new Date(),
   };
 
@@ -74,9 +113,6 @@ export async function uploadAndIndexFile(filePath) {
 
 /**
  * Vector search trên collection 'fund'
- * @param {string} query
- * @param {number} topk
- * @returns {Promise<Array<{_id, score, ...payload}>>}
  */
 export async function fundVectorSearch(query, topk = 5) {
   const db = await getDb();
@@ -93,7 +129,7 @@ export async function fundVectorSearch(query, topk = 5) {
         index: VECTOR_INDEX_NAME,
         path: VECTOR_PATH,
         queryVector,
-        numCandidates: safeTopK * 10, // tốt hơn fix cứng 200
+        numCandidates: safeTopK * 10,
         limit: safeTopK,
         similarity: "cosine",
       },
