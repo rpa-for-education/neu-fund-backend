@@ -342,7 +342,15 @@ app.post("/api/agent", async (req, res) => {
         fileHits = [];
         fileContext = "";
       }
-      
+
+    } catch (e) {   // ✅ thêm catch bị thiếu ở đây
+      console.error("❌ Lỗi khi tìm kiếm hoặc đọc file:", e);
+      hits = [];
+      fileHits = [];
+      fileContext = "";
+    }
+
+    // --- phần dưới giữ nguyên ---
     let memoryEntries = [];
     if (Array.isArray(req.body.chat_history)) {
       console.log("DEBUG chat_history:");
