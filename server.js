@@ -14,6 +14,7 @@ import { callLLM } from "./llm.js";
 import { encode } from "gpt-tokenizer";
 import { getDb } from "./db.js";
 import { fundVectorSearch, initEmbedding, embedText } from "./search.js";
+import { readDocxFromUrl } from "./search.js";
 import { addToMemory, getMemory } from "./memory.js";
 import { s3Client } from "./s3.js";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
@@ -283,8 +284,10 @@ app.post("/api/agent", async (req, res) => {
           const existing = await fileCol.findOne({ url: link });
           if (!existing) {
             try {
+              console.log("📄 Đang tải file:", link);
               const resp = await fetch(link);
               if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
               const buffer = Buffer.from(await resp.arrayBuffer());
               const ext = link.toLowerCase().endsWith(".pdf")
                 ? ".pdf"
@@ -293,6 +296,7 @@ app.post("/api/agent", async (req, res) => {
                 : ".txt";
 
               let extractedText = "";
+
               if (ext === ".pdf") {
                 const data = await pdfParse(buffer);
                 extractedText = data.text;
@@ -302,6 +306,9 @@ app.post("/api/agent", async (req, res) => {
               } else {
                 extractedText = buffer.toString("utf8");
               }
+
+              // 🧠 Log kiểm tra nội dung đọc được
+              console.log("📜 Trích xuất nội dung:", extractedText.slice(0, 200), "...");
 
               if (extractedText.trim()) {
                 const embedding = await embedText(extractedText);
@@ -332,11 +339,7 @@ app.post("/api/agent", async (req, res) => {
         fileHits = [];
         fileContext = "";
       }
-    } catch (e) {
-      hits = [];
-      fileHits = [];
-      fileContext = "";
-    }
+
 
     let memoryEntries = [];
     if (Array.isArray(req.body.chat_history)) {

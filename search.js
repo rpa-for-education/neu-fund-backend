@@ -13,6 +13,7 @@ import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
 import fetch from "node-fetch";
+import * as docx from "docx-parser";
 import pdfParse from "pdf-parse/lib/pdf-parse.js";
 import mammoth from "mammoth";
 
@@ -172,6 +173,37 @@ export async function readFileContent(inputPathOrUrl) {
     // default text read
     const txt = await fs.readFile(filePath, "utf8");
     return txt || "";
+  }
+}
+
+/**
+ * Đọc nội dung .docx từ URL
+ * @param {string} url
+ * @returns {Promise<string>} text content
+ */
+export async function readDocxFromUrl(url) {
+  try {
+    console.log(`📄 Đang tải nội dung file từ: ${url}`);
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`❌ Lỗi tải file: ${res.statusText}`);
+    const arrayBuffer = await res.arrayBuffer();
+
+    // Lưu tạm trong /tmp (chỉ thư mục ghi được trên Vercel)
+    const tempPath = `/tmp/${Date.now()}_temp.docx`;
+    await fs.writeFile(tempPath, Buffer.from(arrayBuffer));
+
+    const text = await new Promise((resolve, reject) => {
+      docx.parseDocx(tempPath, (data) => {
+        if (!data) reject("❌ Không thể đọc nội dung file");
+        else resolve(data);
+      });
+    });
+
+    console.log("✅ Đọc file thành công, độ dài:", text.length);
+    return text;
+  } catch (err) {
+    console.error("⚠️ Lỗi khi đọc file docx:", err);
+    return "";
   }
 }
 
