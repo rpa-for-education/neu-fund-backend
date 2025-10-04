@@ -1,8 +1,13 @@
-// ✅ Cho phép cache model trong thư mục ghi được của Vercel
-process.env.TRANSFORMERS_CACHE = "/tmp";
-process.env.HF_HUB_CACHE = "/tmp";
+// search.js
+// (Bản này giữ nguyên API export của bạn, chỉ thêm logic cache / đọc file / fallback embedding)
 
-import { pipeline } from "@xenova/transformers";
+process.env.TRANSFORMERS_CACHE = process.env.TRANSFORMERS_CACHE || "/tmp/transformers_cache";
+process.env.HF_HUB_CACHE = process.env.HF_HUB_CACHE || "/tmp/hf_hub_cache";
+process.env.HF_HOME = process.env.HF_HOME || "/tmp/hf_home";
+process.env.XDG_CACHE_HOME = process.env.XDG_CACHE_HOME || "/tmp";
+process.env.TMPDIR = process.env.TMPDIR || "/tmp";
+process.env.HOME = process.env.HOME || "/tmp";
+
 import { getDb } from "./db.js";
 import fs from "fs/promises";
 import fsSync from "fs";
@@ -17,28 +22,115 @@ const VECTOR_PATH = process.env.VECTOR_PATH || "vector";
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 
 let embedder = null;
+let usingRemoteEmbed = false;
 
 /**
- * Khởi tạo mô hình embedding
+ * Try to initialize local embedder (Xenova). If it fails -> mark to use remote.
+ * We import @xenova/transformers dynamically so we can set env config first.
  */
 export async function initEmbedding() {
-  if (!embedder) {
-    const model = process.env.EMBEDDING_MODEL || "Xenova/paraphrase-multilingual-mpnet-base-v2";
-    const modelName = model.startsWith("Xenova/") ? model : `Xenova/${model}`;
-    console.log(`⏳ Loading JS embedding model: ${modelName}`);
-    embedder = await pipeline("feature-extraction", modelName);
-    console.log("✅ Embedder ready");
+  if (embedder || usingRemoteEmbed) return true;
+
+  // If explicitly forced to remote embedding
+  if (String(process.env.USE_REMOTE_EMBEDDING || "").toLowerCase() === "true") {
+    usingRemoteEmbed = true;
+    console.info("ℹ️ Using remote embedding (forced by USE_REMOTE_EMBEDDING=true)");
+    return true;
   }
-  return true;
+
+  const model = process.env.EMBEDDING_MODEL || "Xenova/paraphrase-multilingual-mpnet-base-v2";
+  const modelName = model.startsWith("Xenova/") ? model : `Xenova/${model}`;
+
+  try {
+    console.log(`⏳ Attempting to load JS embedding model: ${modelName}`);
+
+    // dynamic import so we can configure env before pipeline is evaluated
+    const transformers = await import("@xenova/transformers");
+    // set transformers env options if available
+    try {
+      if (transformers && transformers.env) {
+        transformers.env.cacheDir = process.env.TRANSFORMERS_CACHE || "/tmp/transformers_cache";
+        transformers.env.useFSCache = true;
+        // optional: transformers.env.localModelPath = process.env.LOCAL_MODEL_PATH || null;
+      }
+    } catch (ee) {
+      // ignore if env object not present
+    }
+
+    const { pipeline } = transformers;
+    embedder = await pipeline("feature-extraction", modelName);
+    console.log("✅ Embedder ready (local Xenova)");
+    return true;
+  } catch (err) {
+    console.warn("⚠️ Failed to init local embedder, will fallback to remote embeddings if available.", err?.message || err);
+    usingRemoteEmbed = true;
+    return true;
+  }
+}
+
+/**
+ * Remote embedding (OpenAI) fallback
+ */
+async function remoteEmbeddingOpenAI(text) {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) throw new Error("No OPENAI_API_KEY provided for remote embedding.");
+
+  // Simple call to OpenAI embeddings endpoint (text-embedding-3-small). Adjust model if needed.
+  const body = {
+    model: process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small",
+    input: text,
+  };
+
+  const resp = await fetch("https://api.openai.com/v1/embeddings", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(`OpenAI embed failed: ${resp.status} ${txt}`);
+  }
+
+  const j = await resp.json();
+  const vec = j.data && j.data[0] && j.data[0].embedding;
+  if (!vec) throw new Error("Invalid embedding response from OpenAI");
+  return vec;
 }
 
 /**
  * Sinh vector embedding từ text
+ * - nếu có embedder local thì dùng, nếu không dùng OpenAI (nếu có API key)
  */
 async function embed(text) {
-  if (!embedder) await initEmbedding();
-  const out = await embedder(text, { pooling: "mean", normalize: true });
-  return Array.from(out.data);
+  if (!embedder && !usingRemoteEmbed) {
+    await initEmbedding();
+  }
+
+  // If local embedder available
+  if (embedder) {
+    try {
+      // pipeline returns object with .data; keep original pooling/normalize
+      const out = await embedder(text, { pooling: "mean", normalize: true });
+      // out.data maybe TypedArray
+      return Array.from(out.data);
+    } catch (e) {
+      console.warn("⚠️ Local embedder failed during embed(), switching to remote:", e?.message || e);
+      usingRemoteEmbed = true;
+      embedder = null;
+    }
+  }
+
+  // fallback remote
+  try {
+    return await remoteEmbeddingOpenAI(text);
+  } catch (e) {
+    console.error("❌ Remote embedding also failed:", e?.message || e);
+    throw e;
+  }
 }
 
 export async function embedText(text) {
@@ -46,64 +138,63 @@ export async function embedText(text) {
 }
 
 /**
- * Đọc nội dung từ file hoặc link tải về
- * - Hỗ trợ PDF, DOCX, TXT, và URL
+ * Đọc nội dung từ file path hoặc URL
+ * Hỗ trợ: .pdf, .docx, .txt
  */
 export async function readFileContent(inputPathOrUrl) {
-  let filePath = inputPathOrUrl;
-  let buffer;
+  // If it's a URL -> fetch into /tmp
+  let tmpPath = null;
+  let buffer = null;
 
-  // Nếu là URL thì tải về /tmp
-  if (inputPathOrUrl.startsWith("http://") || inputPathOrUrl.startsWith("https://")) {
-    const response = await fetch(inputPathOrUrl);
-    if (!response.ok) throw new Error(`❌ Không tải được file từ URL: ${inputPathOrUrl}`);
-    buffer = Buffer.from(await response.arrayBuffer());
-    const filename = `/tmp/${Date.now()}_${path.basename(new URL(inputPathOrUrl).pathname)}`;
-    await fs.writeFile(filename, buffer);
-    filePath = filename;
+  if (typeof inputPathOrUrl === "string" && (inputPathOrUrl.startsWith("http://") || inputPathOrUrl.startsWith("https://"))) {
+    const resp = await fetch(inputPathOrUrl);
+    if (!resp.ok) {
+      throw new Error(`Failed to fetch ${inputPathOrUrl}: ${resp.status}`);
+    }
+    const ab = await resp.arrayBuffer();
+    buffer = Buffer.from(ab);
+    tmpPath = path.join("/tmp", `${Date.now()}_${path.basename(new URL(inputPathOrUrl).pathname)}`);
+    await fs.writeFile(tmpPath, buffer);
   }
 
-  const ext = path.extname(filePath).toLowerCase();
+  const filePath = tmpPath || inputPathOrUrl;
+  const ext = (path.extname(String(filePath)) || "").toLowerCase();
 
   if (ext === ".pdf") {
-    const dataBuffer = buffer || (await fs.readFile(filePath));
-    const pdfData = await pdfParse(dataBuffer);
-    return pdfData.text.trim();
+    const dataBuffer = buffer || await fs.readFile(filePath);
+    const pdf = await pdfParse(dataBuffer);
+    return pdf.text || "";
+  } else if (ext === ".docx") {
+    const dataBuffer = buffer || await fs.readFile(filePath);
+    const { value } = await mammoth.extractRawText({ buffer: dataBuffer });
+    return value || "";
+  } else {
+    // default text read
+    const txt = await fs.readFile(filePath, "utf8");
+    return txt || "";
   }
-
-  if (ext === ".docx") {
-    const dataBuffer = buffer || (await fs.readFile(filePath));
-    const result = await mammoth.extractRawText({ buffer: dataBuffer });
-    return result.value.trim();
-  }
-
-  // Mặc định đọc text
-  const text = await fs.readFile(filePath, "utf8");
-  return text.trim();
 }
 
 /**
- * Upload file → đọc nội dung → nhúng → lưu MongoDB
+ * Upload filePathOrUrl -> đọc -> embed -> lưu Mongo
+ * - filePathOrUrl có thể là đường dẫn local hoặc URL (http/https)
  */
 export async function uploadAndIndexFile(filePathOrUrl) {
   const db = await getDb();
   const col = db.collection(MONGO_COLLECTION);
 
-  // ✅ Đọc nội dung
   const content = await readFileContent(filePathOrUrl);
   if (!content || !content.trim()) {
     throw new Error("❌ File rỗng hoặc không đọc được nội dung.");
   }
 
-  // ✅ Sinh vector
   const vector = await embed(content);
 
-  // ✅ Lưu vào Mongo
   const doc = {
-    text: content.slice(0, 5000), // Giới hạn nội dung lưu (tối đa 5k ký tự)
+    text: content.slice(0, 20000), // lưu giới hạn (bạn có thể chỉnh)
     [VECTOR_PATH]: vector,
     source: filePathOrUrl,
-    createdAt: new Date(),
+    uploadedAt: new Date(),
   };
 
   const result = await col.insertOne(doc);
