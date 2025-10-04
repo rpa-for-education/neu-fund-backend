@@ -22,7 +22,7 @@ const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
 const FILES_COLLECTION = process.env.FILES_COLLECTION || "uploaded_files";
 const DEFAULT_LIMIT_FUND = 100;
 const DEFAULT_SHORT_MEMORY_SIZE = 10;
-const MAX_SHORT_HISTORY = 5; // 5 cặp hỏi - đáp gần nhất
+const MAX_SHORT_HISTORY = 5; // số cặp hỏi - đáp gần nhất
 
 function formatAnswerText(rawText) {
   if (!rawText) return "";
@@ -278,11 +278,11 @@ app.post("/api/agent", async (req, res) => {
     }
 
     let memoryEntries = [];
-    if (Array.isArray(context?.history)) {
-      const recentHistory = context.history.slice(-MAX_SHORT_HISTORY * 2);
+    if (Array.isArray(context?.history_chat)) {
+      const recentHistory = context.history_chat.slice(-MAX_SHORT_HISTORY * 2);
       memoryEntries = recentHistory.map(entry => ({
         role: entry.role || "user",
-        text: entry.text || ""
+        text: entry.content || ""
       })).filter(m => m.text.trim().length > 0);
     }
 
@@ -347,9 +347,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
         meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
         createdAt: new Date(),
       });
-    } catch (e) {}
-
-    // nếu cần bạn có thể lưu memoryEntries vào DB (tùy bạn)
+    } catch (e) { }
 
     return res.json({
       sessionId: sid,
@@ -360,6 +358,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       memory: { entries_count: memoryEntries.length },
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
+
   } catch (err) {
     return res.status(500).json({ error: err.message || "Internal error" });
   }
