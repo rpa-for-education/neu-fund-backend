@@ -1,11 +1,9 @@
-// server.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import session from "express-session";
 import multer from "multer";
 import fs from "fs";
-import pdfParse from "pdf-parse/lib/pdf-parse.js";
 import mammoth from "mammoth";
 import fetch from "node-fetch"; // ✅ thêm fetch để tải file từ link
 
@@ -13,7 +11,7 @@ import { ObjectId } from "mongodb";
 import { callLLM } from "./llm.js";
 import { encode } from "gpt-tokenizer";
 import { getDb } from "./db.js";
-import { fundVectorSearch, initEmbedding, embedText } from "./search.js";
+import { fundVectorSearch, initEmbedding, embedText, readFileContent } from "./search.js";
 import { readDocxFromUrl } from "./search.js";
 import { addToMemory, getMemory } from "./memory.js";
 import { s3Client } from "./s3.js";
@@ -67,6 +65,16 @@ app.use(express.json({ limit: "10mb" }));
 
 const upload = multer({ storage: multer.memoryStorage() });
 
+// Initialize embedding at startup (will throw if local embedder not available)
+(async () => {
+  try {
+    await initEmbedding();
+  } catch (e) {
+    console.error("⚠️ initEmbedding failed at startup:", e);
+    // do not exit — letting endpoints handle initialization as needed, but warn
+  }
+})();
+
 // ============================= UPLOAD FILE API =============================
 app.post("/api/upload", upload.array("file"), async (req, res) => {
   try {
@@ -88,37 +96,63 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
       const prefix = userEmail || folder || "";
       const key = prefix ? `${prefix}/${uniqueName}` : uniqueName;
 
-      await s3Client.send(
-        new PutObjectCommand({
-          Bucket: process.env.MINIO_BUCKET_NAME,
-          Key: key,
-          Body: file.buffer,
-          ContentType: file.mimetype,
-        })
-      );
+      // upload to minio/s3 if configured
+      try {
+        await s3Client.send(
+          new PutObjectCommand({
+            Bucket: process.env.MINIO_BUCKET_NAME,
+            Key: key,
+            Body: file.buffer,
+            ContentType: file.mimetype,
+          })
+        );
+      } catch (err) {
+        console.error("❌ S3 upload failed:", err);
+        // continue — still attempt to index locally
+      }
 
       const fileUrl = `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}/${process.env.MINIO_BUCKET_NAME}/${key}`;
 
       let extractedText = "";
       if (ext === ".pdf") {
-        const data = await pdfParse(file.buffer);
-        extractedText = data.text;
+        // dynamic import pdf-parse to avoid module init side-effects in serverless env
+        try {
+          const { default: pdfParse } = await import("pdf-parse");
+          const data = await pdfParse(file.buffer);
+          extractedText = data?.text || "";
+        } catch (e) {
+          console.error("❌ pdfParse error (upload):", e);
+          extractedText = "";
+        }
       } else if (ext === ".docx") {
-        const { value } = await mammoth.extractRawText({ buffer: file.buffer });
-        extractedText = value;
+        try {
+          const { value } = await mammoth.extractRawText({ buffer: file.buffer });
+          extractedText = value || "";
+        } catch (e) {
+          console.error("❌ mammoth docx parse error (upload):", e);
+          extractedText = "";
+        }
       } else if (ext === ".txt") {
         extractedText = file.buffer.toString("utf8");
       }
 
-      if (extractedText.trim()) {
-        const embedding = await embedText(extractedText);
-        await fileCol.insertOne({
-          name: uniqueName,
-          url: fileUrl,
-          text: extractedText,
-          vector: embedding,
-          uploadedAt: new Date(),
-        });
+      if (extractedText && extractedText.trim()) {
+        // ensure embedder initialized
+        try {
+          const embedding = await embedText(extractedText);
+          await fileCol.insertOne({
+            name: uniqueName,
+            url: fileUrl,
+            text: extractedText,
+            vector: embedding,
+            uploadedAt: new Date(),
+          });
+        } catch (e) {
+          console.error("❌ Indexing uploaded file failed (embedding):", e);
+          // still continue
+        }
+      } else {
+        console.warn("⚠️ Uploaded file has no extracted text:", uniqueName);
       }
 
       uploadedUrls.push(fileUrl);
@@ -135,6 +169,7 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
 app.get("/api/health", async (_req, res) => {
   try {
     const db = await getDb();
+    // ensure embedding init attempted
     await initEmbedding().catch(() => {});
     res.json({
       status: "ok",
@@ -271,44 +306,75 @@ app.post("/api/agent", async (req, res) => {
     let fileContext = "";
 
     try {
+      // search in fund collection
       hits = await fundVectorSearch(question, k);
       hits = hits.map(
         ({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest
       );
 
+      // vector for query
       const queryVec = await embedText(question);
 
-      // ✅ XỬ LÝ FILE LINK
+      // --- VECTOR SEARCH ON UPLOADED_FILES collection ---
       try {
+        // Use MongoDB vectorSearch on uploaded_files
+        fileHits = await fileCol.aggregate([
+          {
+            $vectorSearch: {
+              index: process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files",
+              path: "vector",
+              queryVector: queryVec,
+              numCandidates: Math.max(50, k * 10),
+              limit: k,
+              similarity: "cosine",
+            },
+          },
+          {
+            $project: {
+              vector: 0,
+              score: { $meta: "vectorSearchScore" },
+            },
+          },
+        ]).toArray();
+
+        // Build context from file contents (short snippets)
+        if (fileHits && fileHits.length > 0) {
+          fileContext = fileHits
+            .map((f, i) => {
+              const snippet = (f.text || "").replace(/\s+/g, " ").slice(0, 600);
+              return `${i + 1}. ${f.name || "(no name)"} - ${f.url}\n${snippet}${snippet.length < (f.text||"").length ? "..." : ""}\n`;
+            })
+            .join("\n");
+        }
+      } catch (fileSearchErr) {
+        console.warn("⚠️ uploaded_files vector search failed:", fileSearchErr?.message || fileSearchErr);
+        // fallback: if user provided file links in request, try to fetch & index them now
         if (Array.isArray(file_name) && file_name.length > 0) {
           for (const link of file_name) {
-            const existing = await fileCol.findOne({ url: link });
-            if (!existing) {
-              try {
-                console.log("📄 Đang tải file:", link);
+            try {
+              const existing = await fileCol.findOne({ url: link });
+              if (!existing) {
+                console.log("📄 Downloading and indexing file:", link);
                 const resp = await fetch(link);
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
                 const buffer = Buffer.from(await resp.arrayBuffer());
                 const ext = link.toLowerCase().endsWith(".pdf")
                   ? ".pdf"
                   : link.toLowerCase().endsWith(".docx")
                   ? ".docx"
                   : ".txt";
-
                 let extractedText = "";
-
                 if (ext === ".pdf") {
+                  const { default: pdfParse } = await import("pdf-parse");
                   const data = await pdfParse(buffer);
-                  extractedText = data.text;
+                  extractedText = data?.text || "";
                 } else if (ext === ".docx") {
                   const { value } = await mammoth.extractRawText({ buffer });
-                  extractedText = value;
+                  extractedText = value || "";
                 } else {
                   extractedText = buffer.toString("utf8");
                 }
-
-                if (extractedText.trim()) {
+                if (extractedText && extractedText.trim()) {
                   const embedding = await embedText(extractedText);
                   await fileCol.insertOne({
                     name: link.split("/").pop(),
@@ -318,39 +384,54 @@ app.post("/api/agent", async (req, res) => {
                     uploadedAt: new Date(),
                   });
                 }
-              } catch (fetchErr) {
-                console.error("❌ Không thể đọc file link:", link, fetchErr);
               }
+            } catch (fetchErr) {
+              console.error("❌ Không thể đọc/index file link:", link, fetchErr);
             }
           }
 
-          const foundFiles = await fileCol
-            .find({ url: { $in: file_name } })
-            .toArray();
+          // try file search again after indexing
+          try {
+            fileHits = await fileCol.aggregate([
+              {
+                $vectorSearch: {
+                  index: process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files",
+                  path: "vector",
+                  queryVector: queryVec,
+                  numCandidates: Math.max(50, k * 10),
+                  limit: k,
+                  similarity: "cosine",
+                },
+              },
+              {
+                $project: {
+                  vector: 0,
+                  score: { $meta: "vectorSearchScore" },
+                },
+              },
+            ]).toArray();
 
-          fileContext = foundFiles
-            .map((f, i) => `${i + 1}. ${f.name} - ${f.url}`)
-            .join("\n");
-
-          fileHits = foundFiles.slice(0, k);
-        } else {
-          fileHits = [];
-          fileContext = "";
+            if (fileHits && fileHits.length > 0) {
+              fileContext = fileHits
+                .map((f, i) => {
+                  const snippet = (f.text || "").replace(/\s+/g, " ").slice(0, 600);
+                  return `${i + 1}. ${f.name || "(no name)"} - ${f.url}\n${snippet}${snippet.length < (f.text||"").length ? "..." : ""}\n`;
+                })
+                .join("\n");
+            }
+          } catch (secondErr) {
+            console.warn("⚠️ Second attempt file search failed:", secondErr?.message || secondErr);
+          }
         }
-      } catch (e) {
-        hits = [];
-        fileHits = [];
-        fileContext = "";
       }
-
-    } catch (e) {   // ✅ thêm catch bị thiếu ở đây
+    } catch (e) {   // ✅ giữ catch tổng cho tìm kiếm
       console.error("❌ Lỗi khi tìm kiếm hoặc đọc file:", e);
       hits = [];
       fileHits = [];
       fileContext = "";
     }
 
-    // --- phần dưới giữ nguyên ---
+    // --- phần còn lại giữ nguyên ---
     let memoryEntries = [];
     if (Array.isArray(req.body.chat_history)) {
       console.log("DEBUG chat_history:");
@@ -449,6 +530,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
   } catch (err) {
+    console.error("❌ Unhandled error in /api/agent:", err);
     return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
