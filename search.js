@@ -16,8 +16,8 @@ import * as docx from "docx-parser";
 import mammoth from "mammoth";
 import { getDb } from "./db.js";
 
-const client = new MongoClient(process.env.MONGODB_URI);
-const dbName = process.env.MONGODB_DB || "fitneu";
+const client = new MongoClient(process.env.MONGO_URI);
+const dbName = process.env.MONGO_DB || "fitneu";
 
 // Giới hạn topK (có thể cấu hình qua .env)
 const MAX_TOPK = parseInt(process.env.MAX_TOPK || "30", 10);
