@@ -148,7 +148,6 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
             name: uniqueName,
             url: fileUrl,
             text: extractedText,
-            sessionId: req.body.session_id,
             vector: embedding,
             uploadedAt: new Date(),
           });
@@ -276,11 +275,11 @@ app.post("/api/agent", async (req, res) => {
     let question = rawQuestion || prompt;
 
     if (!question?.trim()) {
-      if (Array.isArray(files) && files.length > 0) {
+      if (Array.isArray(file_name) && file_name.length > 0) {
         question =
-          files.length === 1
-            ? `Hãy đọc nội dung của file ${files[0]}`
-            : `Hãy đọc nội dung các file: ${files.join(", ")}`;
+          file_name.length === 1
+            ? `Hãy đọc nội dung của file ${file_name[0]}`
+            : `Hãy đọc nội dung các file: ${file_name.join(", ")}`;
       } else if (fileName) {
         question = `Hãy đọc nội dung của file ${fileName}`;
       }
@@ -309,54 +308,40 @@ app.post("/api/agent", async (req, res) => {
       console.log(">>> session_id before vector search:", req.body.session_id);
       console.log(">>> query vector length:", queryVec.length);
 
-      try {
-        const rawFileHits = await fileCol.aggregate([
-          {
-            $vectorSearch: {
-              index: process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files",
-              path: "vector",
-              queryVector: queryVec,
-              numCandidates: Math.max(50, k * 10),
-              limit: Math.max(50, k * 10), // Lấy nhiều kết quả trước rồi lọc
-              similarity: "cosine",
-            },
+      fileHits = await fileCol.aggregate([
+        {
+          $vectorSearch: {
+            index: process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files",
+            path: "vector",
+            queryVector: queryVec,
+            numCandidates: Math.max(50, k * 10),
+            limit: k,
+            similarity: "cosine",
           },
-          {
-            $project: {
-              vector: 0,
-              score: { $meta: "vectorSearchScore" },
-              sessionId: 1,
-              name: 1,
-              text: 1,
-              url: 1,
-            },
+        },
+        {
+          $project: {
+            vector: 0,
+            score: { $meta: "vectorSearchScore" },
           },
-        ]).toArray();
+        },
+      ]).toArray();
 
-        // Sau khi chạy vector search lấy kết quả thô:
-        console.log(">>> raw vector search results count:", rawFileHits.length);
-        console.log(">>> first few results:", rawFileHits.slice(0, 3));
 
-        // Lọc kết quả theo sessionId trên ứng dụng
-        fileHits = rawFileHits.filter(f => f.sessionId === req.body.session_id).slice(0, k);
-        
-
-        // Sau khi lọc theo sessionId:
-        console.log(">>> filtered fileHits count:", fileHits.length);
-
-        if (fileHits.length > 0) {
-          fileContext = fileHits
-            .map((f, i) => {
-              const snippet = (f.text || "").replace(/\s+/g, " ").slice(0, 600);
-              return `${i + 1}. ${f.name || "(no name)"} - ${f.url}\n${snippet}${snippet.length < (f.text || "").length ? "..." : ""}\n`;
-            })
-            .join("\n");
-        } else {
-          fileContext = "";
+      if (fileHits && fileHits.length > 0) {
+        fileContext = fileHits
+          .map((f, i) => {
+            const snippet = (f.text || "").replace(/\s+/g, " ").slice(0, 600);
+            return `${i + 1}. ${f.name || "(no name)"} - ${f.url}\n${snippet}${snippet.length < (f.text || "").length ? "..." : ""}\n`;
+          })
+          .join("\n");
         }
       } catch (fileSearchErr) {
         console.warn("⚠️ uploaded_files vector search failed:", fileSearchErr?.message || fileSearchErr);
-      }
+      }        
+
+      // Sau khi lọc theo sessionId:
+      console.log(">>> filtered fileHits count:", fileHits.length);
     } catch (e) {
       hits = [];
       fileHits = [];
