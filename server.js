@@ -4,28 +4,24 @@ import cors from "cors";
 import multer from "multer";
 import mammoth from "mammoth";
 import fetch from "node-fetch";
-import { ObjectId } from "mongodb";
 import { callLLM } from "./llm.js";
 import { encode } from "gpt-tokenizer";
-import { getDb } from "./db.js";
+import { PutObjectCommand } from "@aws-sdk/client-s3";
+import { s3Client } from "./s3.js";
 import {
-  fundVectorSearch,
+  getDb,
   initEmbedding,
   embedText,
-  readFileContent,
-  readDocxFromUrl,
+  fundVectorSearch,
 } from "./search.js";
-import { addToMemory, getMemory } from "./memory.js";
-import { s3Client } from "./s3.js";
-import { PutObjectCommand } from "@aws-sdk/client-s3";
 
 const PORT = process.env.PORT || 4000;
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 const FUNDLOGS_COLLECTION = process.env.FUNDLOGS_COLLECTION || "fundlogs";
 const FILES_COLLECTION = process.env.FILES_COLLECTION || "uploaded_files";
 const DEFAULT_LIMIT_FUND = 100;
-const DEFAULT_SHORT_MEMORY_SIZE = 10;
-const MAX_SHORT_HISTORY = 5; // 5 cặp hỏi - đáp gần nhất
+const MAX_SHORT_HISTORY = 5;
+const UPLOADED_FILES_INDEX = process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files";
 
 function formatAnswerText(rawText) {
   if (!rawText) return "";
@@ -41,16 +37,10 @@ function getPagination(req) {
   const skip = limit ? (page - 1) * limit : 0;
   return { page, limit, skip };
 }
-
 function buildSearchFilter(q, fields = []) {
   if (!q) return {};
   const regex = { $regex: q, $options: "i" };
   return { $or: fields.map((f) => ({ [f]: regex })) };
-}
-
-async function Funds() {
-  const db = await getDb();
-  return db.collection(MONGO_COLLECTION);
 }
 
 const app = express();
@@ -58,13 +48,9 @@ app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 const upload = multer({ storage: multer.memoryStorage() });
 
-let embeddingInitialized = false;
 (async () => {
   try {
-    if (!embeddingInitialized) {
-      await initEmbedding();
-      embeddingInitialized = true;
-    }
+    await initEmbedding();
   } catch (e) {
     console.error("⚠️ initEmbedding failed at startup:", e);
   }
@@ -76,11 +62,9 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: "No file uploaded" });
     }
-
     const db = await getDb();
     const fileCol = db.collection(FILES_COLLECTION);
     const uploadedUrls = [];
-
     for (const file of req.files) {
       const parts = file.originalname.split(".");
       const ext = parts.length > 1 ? "." + parts.pop().toLowerCase() : "";
@@ -110,7 +94,6 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
           extractedText = data?.text || "";
         } catch (e) {
           console.error("❌ pdfParse error (upload):", e);
-          extractedText = "";
         }
       } else if (ext === ".docx") {
         try {
@@ -118,12 +101,10 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
           extractedText = value || "";
         } catch (e) {
           console.error("❌ mammoth docx parse error (upload):", e);
-          extractedText = "";
         }
       } else if (ext === ".txt") {
         extractedText = file.buffer.toString("utf8");
       }
-
       if (extractedText && extractedText.trim()) {
         try {
           const embedding = await embedText(extractedText);
@@ -171,27 +152,18 @@ app.get("/api/funds", async (req, res) => {
   try {
     const { q } = req.query;
     const { limit, skip, page } = getPagination(req);
-    const filter = buildSearchFilter(q, [
-      "OPPORTUNITY TITLE",
-      "OPPORTUNITY URL",
-      "_key",
-    ]);
-    const col = await Funds();
+    const filter = buildSearchFilter(q, ["OPPORTUNITY TITLE", "OPPORTUNITY URL", "_key"]);
+    const db = await getDb();
+    const col = db.collection(MONGO_COLLECTION);
     if (!limit) {
-      res.writeHead(200, {
-        "Content-Type": "application/json; charset=utf-8",
-      });
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       const cursor = col
-        .find(filter, {
-          projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 },
-        })
+        .find(filter, { projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 } })
         .sort({ POSTED_DATE: -1 })
         .limit(DEFAULT_LIMIT_FUND);
       const total = await col.countDocuments(filter);
       let first = true;
-      res.write(
-        `{"page":1,"limit":${DEFAULT_LIMIT_FUND},"total":${total},"items":[`
-      );
+      res.write(`{"page":1,"limit":${DEFAULT_LIMIT_FUND},"total":${total},"items":[`);
       await cursor.forEach((doc) => {
         const mapped = {
           name: doc["OPPORTUNITY TITLE"],
@@ -205,9 +177,7 @@ app.get("/api/funds", async (req, res) => {
       res.end();
     } else {
       const cursor = col
-        .find(filter, {
-          projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 },
-        })
+        .find(filter, { projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 } })
         .sort({ POSTED_DATE: -1 });
       const [items, total] = await Promise.all([
         cursor.skip(skip).limit(limit).toArray(),
@@ -264,15 +234,13 @@ app.post("/api/agent", async (req, res) => {
     let fileContext = "";
     try {
       hits = await fundVectorSearch(question, k);
-      hits = hits.map(
-        ({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest
-      );
+      hits = hits.map(({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest);
       const queryVec = await embedText(question);
       try {
         fileHits = await fileCol.aggregate([
           {
             $vectorSearch: {
-              index: process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files",
+              index: UPLOADED_FILES_INDEX,
               path: "vector",
               queryVector: queryVec,
               numCandidates: Math.max(50, k * 10),
@@ -291,84 +259,18 @@ app.post("/api/agent", async (req, res) => {
           fileContext = fileHits
             .map((f, i) => {
               const snippet = (f.text || "").replace(/\s+/g, " ").slice(0, 600);
-              return `${i + 1}. ${f.name || "(no name)"} - ${f.url}\n${snippet}${snippet.length < (f.text||"").length ? "..." : ""}\n`;
+              return `${i + 1}. ${f.name || "(no name)"} - ${f.url}\n${snippet}${snippet.length < (f.text || "").length ? "..." : ""}\n`;
             })
             .join("\n");
         }
       } catch (fileSearchErr) {
-        if (Array.isArray(file_name) && file_name.length > 0) {
-          for (const link of file_name) {
-            try {
-              const existing = await fileCol.findOne({ url: link });
-              if (!existing) {
-                const resp = await fetch(link);
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                const buffer = Buffer.from(await resp.arrayBuffer());
-                const ext = link.toLowerCase().endsWith(".pdf")
-                  ? ".pdf"
-                  : link.toLowerCase().endsWith(".docx")
-                  ? ".docx"
-                  : ".txt";
-                let extractedText = "";
-                if (ext === ".pdf") {
-                  const { default: pdfParse } = await import("pdf-parse");
-                  const data = await pdfParse(buffer);
-                  extractedText = data?.text || "";
-                } else if (ext === ".docx") {
-                  const { value } = await mammoth.extractRawText({ buffer });
-                  extractedText = value || "";
-                } else {
-                  extractedText = buffer.toString("utf8");
-                }
-                if (extractedText && extractedText.trim()) {
-                  const embedding = await embedText(extractedText);
-                  await fileCol.insertOne({
-                    name: link.split("/").pop(),
-                    url: link,
-                    text: extractedText,
-                    vector: embedding,
-                    uploadedAt: new Date(),
-                  });
-                }
-              }
-            } catch (fetchErr) {}
-          }
-          try {
-            fileHits = await fileCol.aggregate([
-              {
-                $vectorSearch: {
-                  index: process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files",
-                  path: "vector",
-                  queryVector: queryVec,
-                  numCandidates: Math.max(50, k * 10),
-                  limit: k,
-                  similarity: "cosine",
-                },
-              },
-              {
-                $project: {
-                  vector: 0,
-                  score: { $meta: "vectorSearchScore" },
-                },
-              },
-            ]).toArray();
-            if (fileHits && fileHits.length > 0) {
-              fileContext = fileHits
-                .map((f, i) => {
-                  const snippet = (f.text || "").replace(/\s+/g, " ").slice(0, 600);
-                  return `${i + 1}. ${f.name || "(no name)"} - ${f.url}\n${snippet}${snippet.length < (f.text||"").length ? "..." : ""}\n`;
-                })
-                .join("\n");
-            }
-          } catch (secondErr) {}
-        }
+        fileContext = "";
       }
     } catch (e) {
       hits = [];
       fileHits = [];
       fileContext = "";
     }
-
     let memoryEntries = [];
     if (Array.isArray(req.body.chat_history)) {
       const recentHistory = req.body.chat_history.slice(-MAX_SHORT_HISTORY * 2);
@@ -380,11 +282,8 @@ app.post("/api/agent", async (req, res) => {
         .filter((m) => m.text.trim().length > 0);
     }
     const contextText = hits
-      .map(
-        (f, i) =>
-          `${i + 1}. ${f["OPPORTUNITY TITLE"] || ""} - ${
-            f["AGENCY NAME"] || ""
-          } - ${f["OPPORTUNITY URL"] || ""}`
+      .map((f, i) =>
+        `${i + 1}. ${f["OPPORTUNITY TITLE"] || ""} - ${f["AGENCY NAME"] || ""} - ${f["OPPORTUNITY URL"] || ""}`
       )
       .join("\n");
     const memoryText = memoryEntries
@@ -393,16 +292,7 @@ app.post("/api/agent", async (req, res) => {
     if (fileContext.trim()) {
       fileContext = `Dưới đây là các file người dùng đã tải lên có liên quan:\n${fileContext}\n\n`;
     }
-    const promptText = `
-Người dùng hỏi: "${question}"
-
-${memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n" : ""}
-Dưới đây là danh sách quỹ có liên quan:
-${contextText}
-
-${fileContext}Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và đường dẫn.
-Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy dữ liệu phù hợp".
-`;
+    const promptText = `\nNgười dùng hỏi: "${question}"\n\n${memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n" : ""}Dưới đây là danh sách quỹ có liên quan:\n${contextText}\n\n${fileContext}Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và đường dẫn.\nNếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy dữ liệu phù hợp".\n`;
     const llmRes = await callLLM(promptText, resolvedModel);
     let text = "";
     let provider = null;
@@ -449,6 +339,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
   } catch (err) {
+    console.error("❌ Unhandled error in /api/agent:", err);
     return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
@@ -457,10 +348,7 @@ if (!process.env.VERCEL) {
   (async () => {
     try {
       await getDb();
-      if (!embeddingInitialized) {
-        await initEmbedding();
-        embeddingInitialized = true;
-      }
+      await initEmbedding();
       app.listen(PORT, () =>
         console.log(`🚀 API running at http://localhost:${PORT}`)
       );
