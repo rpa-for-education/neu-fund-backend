@@ -256,7 +256,8 @@ app.post("/api/agent", async (req, res) => {
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
     const fileCol = db.collection(FILES_COLLECTION);
 
-    console.log(req.body);
+    console.log(">>> req.body:", req.body);
+    console.log(">>> session_id from body:", req.body.session_id);
 
     const sid = req.body.session_id;
     const isNewSession = false;
@@ -290,7 +291,6 @@ app.post("/api/agent", async (req, res) => {
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
     }
 
-
     const resolvedModel = model_id || "qwen-max";
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
@@ -304,6 +304,10 @@ app.post("/api/agent", async (req, res) => {
       );
 
       const queryVec = await embedText(question);
+
+      // Sau khi tạo vector embedding:
+      console.log(">>> session_id before vector search:", req.body.session_id);
+      console.log(">>> query vector length:", queryVec.length);
 
       try {
         const rawFileHits = await fileCol.aggregate([
@@ -329,8 +333,16 @@ app.post("/api/agent", async (req, res) => {
           },
         ]).toArray();
 
+        // Sau khi chạy vector search lấy kết quả thô:
+        console.log(">>> raw vector search results count:", rawFileHits.length);
+        console.log(">>> first few results:", rawFileHits.slice(0, 3));
+
         // Lọc kết quả theo sessionId trên ứng dụng
         fileHits = rawFileHits.filter(f => f.sessionId === req.body.session_id).slice(0, k);
+        
+
+        // Sau khi lọc theo sessionId:
+        console.log(">>> filtered fileHits count:", fileHits.length);
 
         if (fileHits.length > 0) {
           fileContext = fileHits
