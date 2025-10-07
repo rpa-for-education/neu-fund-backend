@@ -308,9 +308,6 @@ app.post("/api/agent", async (req, res) => {
       try {
         fileHits = await fileCol.aggregate([
           {
-            $match: { sessionId: req.body.session_id }
-          },
-          {
             $vectorSearch: {
               index: process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files",
               path: "vector",
