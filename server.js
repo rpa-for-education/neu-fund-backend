@@ -10,7 +10,15 @@ import fetch from "node-fetch";
 import { ObjectId, MongoClient } from "mongodb";
 import { callLLM } from "./llm.js";
 import { encode } from "gpt-tokenizer";
-import { fundVectorSearch, initEmbedding, embedText, readFileContent } from "./search.js";
+import {
+  fundVectorSearch,
+  readFileContent,
+  initEmbedding,
+  embedText,
+  readDocxFromUrl,
+  uploadedFilesVectorSearch
+} from "./search.js";
+
 import { readDocxFromUrl } from "./search.js";
 import { addToMemory, getMemory } from "./memory.js";
 import { s3Client } from "./s3.js";
@@ -90,7 +98,7 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
     const fileCol = db.collection(FILES_COLLECTION);
     const uploadedUrls = [];
 
-    for (const file of req.files) {
+    for (const file of req.file_name) {
       const parts = file.originalname.split(".");
       const ext = parts.length > 1 ? "." + parts.pop().toLowerCase() : "";
       const baseName = parts.join(".");
@@ -243,21 +251,15 @@ app.get("/api/funds", async (req, res) => {
 
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
-
-
-
   try {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
     const fileCol = db.collection(FILES_COLLECTION);
 
-
     console.log(req.body);
-
 
     const sid = req.body.session_id;
     const isNewSession = false;
-
 
     let {
       question: rawQuestion,
@@ -270,9 +272,7 @@ app.post("/api/agent", async (req, res) => {
       file_name,
     } = req.body || {};
 
-
     let question = rawQuestion || prompt;
-
 
     if (!question?.trim()) {
       if (Array.isArray(files) && files.length > 0) {
@@ -297,16 +297,13 @@ app.post("/api/agent", async (req, res) => {
     let fileHits = [];
     let fileContext = "";
 
-
     try {
       hits = await fundVectorSearch(question, k);
       hits = hits.map(
         ({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest
       );
 
-
       const queryVec = await embedText(question);
-
 
       try {
         fileHits = await fileCol.aggregate([
@@ -328,7 +325,6 @@ app.post("/api/agent", async (req, res) => {
           },
         ]).toArray();
 
-
         if (fileHits && fileHits.length > 0) {
           fileContext = fileHits
             .map((f, i) => {
@@ -345,7 +341,6 @@ app.post("/api/agent", async (req, res) => {
       fileHits = [];
       fileContext = "";
     }
-
 
     let memoryEntries = [];
     if (Array.isArray(req.body.chat_history)) {
@@ -373,11 +368,9 @@ app.post("/api/agent", async (req, res) => {
       .map((m) => `- [${m.role}] ${m.text}`)
       .join("\n");
 
-
     if (fileContext.trim()) {
       fileContext = `Dưới đây là các file người dùng đã tải lên có liên quan:\n${fileContext}\n\n`;
     }
-
 
     const promptText = `
 Người dùng hỏi: "${question}"

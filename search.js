@@ -231,70 +231,40 @@ export async function fundVectorSearch(query, topk = 5) {
   }));
 }
 
-// --- search for conferences & journals (alias) ---
-export async function search({ question, topk = 5 }) {
-  await client.connect();
-  const dbCli = client.db(dbName);
-
-  const queryVector = await embed(question);
+// Thêm hàm tìm kiếm vector file upload
+const FILES_COLLECTION = process.env.FILES_COLLECTION || "uploaded_files";
+const VECTOR_INDEX_UPLOADED_FILES = "vector_index_uploaded_files";
+export async function uploadedFilesVectorSearch(query, topk = 5) {
+  const db = await getDb();
+  const col = db.collection(FILES_COLLECTION);
+  const queryVector = await embedText(query);
   const safeTopK = Math.min(Number(topk) || 5, MAX_TOPK);
 
-  const confResults = await dbCli.collection("conference").aggregate([
+  const pipeline = [
     {
       $vectorSearch: {
-        index: "vector_index_conference",
+        index: VECTOR_INDEX_UPLOADED_FILES,
         path: "vector",
         queryVector,
-        numCandidates: 100,
+        numCandidates: safeTopK * 10,
         limit: safeTopK,
         similarity: "cosine",
       },
     },
     {
       $project: {
-        _id: 0,
         vector: 0,
-        created_time: 0,
-        modified_time: 0,
+        name: 1,
+        text: 1,
+        url: 1,
+        uploadedAt: 1,
         score: { $meta: "vectorSearchScore" },
       },
     },
-  ]).toArray();
-
-  const journalResults = await dbCli.collection("journal").aggregate([
-    {
-      $vectorSearch: {
-        index: "vector_index_journal",
-        path: "vector",
-        queryVector,
-        numCandidates: 100,
-        limit: safeTopK,
-        similarity: "cosine",
-      },
-    },
-    {
-      $project: {
-        _id: 0,
-        vector: 0,
-        created_time: 0,
-        modified_time: 0,
-        score: { $meta: "vectorSearchScore" },
-      },
-    },
-  ]).toArray();
-
-  return {
-    conference: confResults,
-    journal: journalResults,
-  };
-}
-
-export async function conferenceVectorSearch(question, topk = 5) {
-  const result = await search({ question, topk });
-  return result.conference;
-}
-
-export async function journalVectorSearch(question, topk = 5) {
-  const result = await search({ question, topk });
-  return result.journal;
+  ];
+  const results = await col.aggregate(pipeline).toArray();
+  return results.map(d => ({
+    ...d,
+    _id: String(d._id)
+  }));
 }
