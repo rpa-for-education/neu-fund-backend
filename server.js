@@ -327,7 +327,6 @@ app.post("/api/agent", async (req, res) => {
         },
       ]).toArray();
 
-
       if (fileHits && fileHits.length > 0) {
         fileContext = fileHits
           .map((f, i) => {
@@ -335,10 +334,11 @@ app.post("/api/agent", async (req, res) => {
             return `${i + 1}. ${f.name || "(no name)"} - ${f.url}\n${snippet}${snippet.length < (f.text || "").length ? "..." : ""}\n`;
           })
           .join("\n");
-        }
+      }
+
       } catch (fileSearchErr) {
         console.warn("⚠️ uploaded_files vector search failed:", fileSearchErr?.message || fileSearchErr);
-      }        
+      }
 
       // Sau khi lọc theo sessionId:
       console.log(">>> filtered fileHits count:", fileHits.length);
