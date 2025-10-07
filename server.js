@@ -1,18 +1,20 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import session from "express-session";
 import multer from "multer";
-import fs from "fs";
 import mammoth from "mammoth";
-import fetch from "node-fetch"; // ✅ thêm fetch để tải file từ link
-
+import fetch from "node-fetch";
 import { ObjectId } from "mongodb";
 import { callLLM } from "./llm.js";
 import { encode } from "gpt-tokenizer";
 import { getDb } from "./db.js";
-import { fundVectorSearch, initEmbedding, embedText, readFileContent } from "./search.js";
-import { readDocxFromUrl } from "./search.js";
+import {
+  fundVectorSearch,
+  initEmbedding,
+  embedText,
+  readFileContent,
+  readDocxFromUrl,
+} from "./search.js";
 import { addToMemory, getMemory } from "./memory.js";
 import { s3Client } from "./s3.js";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
@@ -53,29 +55,21 @@ async function Funds() {
 
 const app = express();
 app.use(cors());
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || "fitneu2025",
-    resave: false,
-    saveUninitialized: true,
-    cookie: { secure: false },
-  })
-);
 app.use(express.json({ limit: "10mb" }));
-
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Initialize embedding at startup (will throw if local embedder not available)
+let embeddingInitialized = false;
 (async () => {
   try {
-    await initEmbedding();
+    if (!embeddingInitialized) {
+      await initEmbedding();
+      embeddingInitialized = true;
+    }
   } catch (e) {
     console.error("⚠️ initEmbedding failed at startup:", e);
-    // do not exit — letting endpoints handle initialization as needed, but warn
   }
 })();
 
-// ============================= UPLOAD FILE API =============================
 app.post("/api/upload", upload.array("file"), async (req, res) => {
   try {
     const { folder, userEmail } = req.body;
@@ -95,8 +89,6 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
       const uniqueName = `${baseName}_${timestamp}${ext}`;
       const prefix = userEmail || folder || "";
       const key = prefix ? `${prefix}/${uniqueName}` : uniqueName;
-
-      // upload to minio/s3 if configured
       try {
         await s3Client.send(
           new PutObjectCommand({
@@ -108,14 +100,10 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
         );
       } catch (err) {
         console.error("❌ S3 upload failed:", err);
-        // continue — still attempt to index locally
       }
-
       const fileUrl = `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}/${process.env.MINIO_BUCKET_NAME}/${key}`;
-
       let extractedText = "";
       if (ext === ".pdf") {
-        // dynamic import pdf-parse to avoid module init side-effects in serverless env
         try {
           const { default: pdfParse } = await import("pdf-parse");
           const data = await pdfParse(file.buffer);
@@ -137,7 +125,6 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
       }
 
       if (extractedText && extractedText.trim()) {
-        // ensure embedder initialized
         try {
           const embedding = await embedText(extractedText);
           await fileCol.insertOne({
@@ -149,15 +136,12 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
           });
         } catch (e) {
           console.error("❌ Indexing uploaded file failed (embedding):", e);
-          // still continue
         }
       } else {
         console.warn("⚠️ Uploaded file has no extracted text:", uniqueName);
       }
-
       uploadedUrls.push(fileUrl);
     }
-
     res.json({ status: "success", files: uploadedUrls });
   } catch (err) {
     console.error("❌ Upload error:", err);
@@ -165,11 +149,9 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
   }
 });
 
-// ============================= HEALTH CHECK =============================
 app.get("/api/health", async (_req, res) => {
   try {
     const db = await getDb();
-    // ensure embedding init attempted
     await initEmbedding().catch(() => {});
     res.json({
       status: "ok",
@@ -185,7 +167,6 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
-// ============================= GET FUNDS =============================
 app.get("/api/funds", async (req, res) => {
   try {
     const { q } = req.query;
@@ -196,26 +177,21 @@ app.get("/api/funds", async (req, res) => {
       "_key",
     ]);
     const col = await Funds();
-
     if (!limit) {
       res.writeHead(200, {
         "Content-Type": "application/json; charset=utf-8",
       });
-
       const cursor = col
         .find(filter, {
           projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 },
         })
         .sort({ POSTED_DATE: -1 })
         .limit(DEFAULT_LIMIT_FUND);
-
       const total = await col.countDocuments(filter);
       let first = true;
-
       res.write(
         `{"page":1,"limit":${DEFAULT_LIMIT_FUND},"total":${total},"items":[`
       );
-
       await cursor.forEach((doc) => {
         const mapped = {
           name: doc["OPPORTUNITY TITLE"],
@@ -225,7 +201,6 @@ app.get("/api/funds", async (req, res) => {
         res.write(JSON.stringify(mapped));
         first = false;
       });
-
       res.write("]}");
       res.end();
     } else {
@@ -234,17 +209,14 @@ app.get("/api/funds", async (req, res) => {
           projection: { "OPPORTUNITY TITLE": 1, "OPPORTUNITY URL": 1 },
         })
         .sort({ POSTED_DATE: -1 });
-
       const [items, total] = await Promise.all([
         cursor.skip(skip).limit(limit).toArray(),
         col.countDocuments(filter),
       ]);
-
       const mappedItems = items.map((doc) => ({
         name: doc["OPPORTUNITY TITLE"],
         url: doc["OPPORTUNITY URL"],
       }));
-
       res.json({ page, limit, total, items: mappedItems });
     }
   } catch (err) {
@@ -253,24 +225,14 @@ app.get("/api/funds", async (req, res) => {
   }
 });
 
-// ============================= AGENT HANDLER =============================
 app.post("/api/agent", async (req, res) => {
   const startedAt = Date.now();
-
   try {
     const db = await getDb();
     const fundlogs = db.collection(FUNDLOGS_COLLECTION);
     const fileCol = db.collection(FILES_COLLECTION);
-
-    console.log(req.body);
-
     const sid = req.body.session_id;
-    let isNewSession = false;
-    if (!req.session.isInitialized) {
-      req.session.isInitialized = true;
-      isNewSession = true;
-    }
-
+    const isNewSession = false;
     let {
       question: rawQuestion,
       prompt,
@@ -281,9 +243,7 @@ app.post("/api/agent", async (req, res) => {
       context,
       file_name,
     } = req.body || {};
-
     let question = rawQuestion || prompt;
-
     if (!question?.trim()) {
       if (Array.isArray(files) && files.length > 0) {
         question =
@@ -294,30 +254,21 @@ app.post("/api/agent", async (req, res) => {
         question = `Hãy đọc nội dung của file ${fileName}`;
       }
     }
-
     if (!question?.trim()) {
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
     }
-
     const resolvedModel = model_id || "qwen-max";
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
     let fileHits = [];
     let fileContext = "";
-
     try {
-      // search in fund collection
       hits = await fundVectorSearch(question, k);
       hits = hits.map(
         ({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest
       );
-
-      // vector for query
       const queryVec = await embedText(question);
-
-      // --- VECTOR SEARCH ON UPLOADED_FILES collection ---
       try {
-        // Use MongoDB vectorSearch on uploaded_files
         fileHits = await fileCol.aggregate([
           {
             $vectorSearch: {
@@ -336,8 +287,6 @@ app.post("/api/agent", async (req, res) => {
             },
           },
         ]).toArray();
-
-        // Build context from file contents (short snippets)
         if (fileHits && fileHits.length > 0) {
           fileContext = fileHits
             .map((f, i) => {
@@ -347,14 +296,11 @@ app.post("/api/agent", async (req, res) => {
             .join("\n");
         }
       } catch (fileSearchErr) {
-        console.warn("⚠️ uploaded_files vector search failed:", fileSearchErr?.message || fileSearchErr);
-        // fallback: if user provided file links in request, try to fetch & index them now
         if (Array.isArray(file_name) && file_name.length > 0) {
           for (const link of file_name) {
             try {
               const existing = await fileCol.findOne({ url: link });
               if (!existing) {
-                console.log("📄 Downloading and indexing file:", link);
                 const resp = await fetch(link);
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const buffer = Buffer.from(await resp.arrayBuffer());
@@ -385,12 +331,8 @@ app.post("/api/agent", async (req, res) => {
                   });
                 }
               }
-            } catch (fetchErr) {
-              console.error("❌ Không thể đọc/index file link:", link, fetchErr);
-            }
+            } catch (fetchErr) {}
           }
-
-          // try file search again after indexing
           try {
             fileHits = await fileCol.aggregate([
               {
@@ -410,7 +352,6 @@ app.post("/api/agent", async (req, res) => {
                 },
               },
             ]).toArray();
-
             if (fileHits && fileHits.length > 0) {
               fileContext = fileHits
                 .map((f, i) => {
@@ -419,26 +360,17 @@ app.post("/api/agent", async (req, res) => {
                 })
                 .join("\n");
             }
-          } catch (secondErr) {
-            console.warn("⚠️ Second attempt file search failed:", secondErr?.message || secondErr);
-          }
+          } catch (secondErr) {}
         }
       }
-    } catch (e) {   // ✅ giữ catch tổng cho tìm kiếm
-      console.error("❌ Lỗi khi tìm kiếm hoặc đọc file:", e);
+    } catch (e) {
       hits = [];
       fileHits = [];
       fileContext = "";
     }
 
-    // --- phần còn lại giữ nguyên ---
     let memoryEntries = [];
     if (Array.isArray(req.body.chat_history)) {
-      console.log("DEBUG chat_history:");
-      req.body.chat_history.forEach((entry, idx) => {
-        console.log(`[${idx}] role: ${entry.role}, content: ${entry.content}`);
-      });
-
       const recentHistory = req.body.chat_history.slice(-MAX_SHORT_HISTORY * 2);
       memoryEntries = recentHistory
         .map((entry) => ({
@@ -447,7 +379,6 @@ app.post("/api/agent", async (req, res) => {
         }))
         .filter((m) => m.text.trim().length > 0);
     }
-
     const contextText = hits
       .map(
         (f, i) =>
@@ -456,15 +387,12 @@ app.post("/api/agent", async (req, res) => {
           } - ${f["OPPORTUNITY URL"] || ""}`
       )
       .join("\n");
-
     const memoryText = memoryEntries
       .map((m) => `- [${m.role}] ${m.text}`)
       .join("\n");
-
     if (fileContext.trim()) {
       fileContext = `Dưới đây là các file người dùng đã tải lên có liên quan:\n${fileContext}\n\n`;
     }
-
     const promptText = `
 Người dùng hỏi: "${question}"
 
@@ -475,11 +403,7 @@ ${contextText}
 ${fileContext}Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và đường dẫn.
 Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy dữ liệu phù hợp".
 `;
-
-    console.log("=== PROMPT ===\n", promptText, "\n=== END PROMPT ===");
-
     const llmRes = await callLLM(promptText, resolvedModel);
-
     let text = "";
     let provider = null;
     if (typeof llmRes === "string") {
@@ -488,9 +412,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       text = llmRes.answer ?? llmRes.text ?? llmRes.content ?? "";
       provider = llmRes.provider ?? null;
     }
-
     text = formatAnswerText(text);
-
     let prompt_tokens = null,
       answer_tokens = null,
       tokens_used = null;
@@ -499,9 +421,7 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       answer_tokens = encode(text).length;
       tokens_used = prompt_tokens + answer_tokens;
     } catch (_) {}
-
     const response_time_ms = Date.now() - startedAt;
-
     try {
       await fundlogs.insertOne({
         question,
@@ -519,7 +439,6 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
         createdAt: new Date(),
       });
     } catch (e) {}
-
     return res.json({
       sessionId: sid,
       isNewSession,
@@ -530,17 +449,18 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
   } catch (err) {
-    console.error("❌ Unhandled error in /api/agent:", err);
     return res.status(500).json({ error: err.message || "Internal error" });
   }
 });
 
-// ============================= SERVER STARTUP =============================
 if (!process.env.VERCEL) {
   (async () => {
     try {
       await getDb();
-      await initEmbedding();
+      if (!embeddingInitialized) {
+        await initEmbedding();
+        embeddingInitialized = true;
+      }
       app.listen(PORT, () =>
         console.log(`🚀 API running at http://localhost:${PORT}`)
       );
