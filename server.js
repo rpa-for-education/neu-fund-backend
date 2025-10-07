@@ -306,14 +306,14 @@ app.post("/api/agent", async (req, res) => {
       const queryVec = await embedText(question);
 
       try {
-        fileHits = await fileCol.aggregate([
+        const rawFileHits = await fileCol.aggregate([
           {
             $vectorSearch: {
               index: process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files",
               path: "vector",
               queryVector: queryVec,
               numCandidates: Math.max(50, k * 10),
-              limit: k,
+              limit: Math.max(50, k * 10), // Lấy nhiều kết quả trước rồi lọc
               similarity: "cosine",
             },
           },
@@ -321,17 +321,26 @@ app.post("/api/agent", async (req, res) => {
             $project: {
               vector: 0,
               score: { $meta: "vectorSearchScore" },
+              sessionId: 1,
+              name: 1,
+              text: 1,
+              url: 1,
             },
           },
         ]).toArray();
 
-        if (fileHits && fileHits.length > 0) {
+        // Lọc kết quả theo sessionId trên ứng dụng
+        fileHits = rawFileHits.filter(f => f.sessionId === req.body.session_id).slice(0, k);
+
+        if (fileHits.length > 0) {
           fileContext = fileHits
             .map((f, i) => {
               const snippet = (f.text || "").replace(/\s+/g, " ").slice(0, 600);
               return `${i + 1}. ${f.name || "(no name)"} - ${f.url}\n${snippet}${snippet.length < (f.text || "").length ? "..." : ""}\n`;
             })
             .join("\n");
+        } else {
+          fileContext = "";
         }
       } catch (fileSearchErr) {
         console.warn("⚠️ uploaded_files vector search failed:", fileSearchErr?.message || fileSearchErr);
