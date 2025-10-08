@@ -194,46 +194,6 @@ export async function uploadAndIndexFile(filePathOrUrl) {
 /**
  * Vector search trên collection 'fund'
  */
-export async function fundVectorSearch(query, topk = 5) {
-  const db = await getDb();
-  const col = db.collection(MONGO_COLLECTION);
-
-  const queryVector = await embed(query);
-  const safeTopK = Math.min(Number(topk) || 5, MAX_TOPK);
-
-  console.log(`🔎 Querying with vector length: ${queryVector.length}, topK=${safeTopK}`);
-
-  const pipelineAgg = [
-    {
-      $vectorSearch: {
-        index: VECTOR_INDEX_NAME,
-        path: VECTOR_PATH,
-        queryVector,
-        numCandidates: safeTopK * 10,
-        limit: safeTopK,
-        similarity: "cosine",
-      },
-    },
-    {
-      $project: {
-        [VECTOR_PATH]: 0,
-        score: { $meta: "vectorSearchScore" },
-      },
-    },
-  ];
-
-  const items = await col.aggregate(pipelineAgg).toArray();
-
-  if (!items || items.length === 0) {
-    console.warn("⚠️ No results found for query:", query);
-    return [];
-  }
-
-  return items.map((d) => ({
-    ...d,
-    _id: String(d._id),
-  }));
-}
 
 export async function search({ question, topk = 5 }) {
   await client.connect();
