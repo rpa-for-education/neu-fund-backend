@@ -326,17 +326,20 @@ app.post("/api/agent", async (req, res) => {
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
     }
 
-    try {
-      funds = await fundVectorSearch(question, Number(k));
-    } catch (e) {
-      console.error("fundVectorSearch error:", e);
-    }
-
     const resolvedModel = model_id || "qwen-max";
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
     let fileHits = [];
     let fileContext = "";
+    let funds = [];
+
+
+
+    try {
+      funds = await fundVectorSearch(question, Number(k));
+    } catch (e) {
+      console.error("fundVectorSearch error:", e);
+    }
 
     try {
       hits = await fundVectorSearch(question, k);
