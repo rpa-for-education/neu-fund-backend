@@ -97,7 +97,7 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
     const fileCol = db.collection(FILES_COLLECTION);
     const uploadedUrls = [];
 
-    for (const file of req.file_name) {
+    for (const file of req.files) {
       const parts = file.originalname.split(".");
       const ext = parts.length > 1 ? "." + parts.pop().toLowerCase() : "";
       const baseName = parts.join(".");
