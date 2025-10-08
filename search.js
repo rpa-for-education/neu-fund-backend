@@ -30,6 +30,7 @@ const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 const UPLOADED_FILES_INDEX = process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files";
 
 let embedder = null;
+let usingRemoteEmbed = false;
 
 /**
  * Initialize local Xenova embedder only.

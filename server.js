@@ -1,7 +1,6 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import session from "express-session";
 import multer from "multer";
 import fs from "fs";
 import mammoth from "mammoth";
@@ -90,14 +89,6 @@ async function getDb() {
 
 const app = express();
 app.use(cors());
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || "fitneu2025",
-    resave: false,
-    saveUninitialized: true,
-    cookie: { secure: false },
-  })
-);
 app.use(express.json({ limit: "10mb" }));
 
 const upload = multer({ storage: multer.memoryStorage() });
