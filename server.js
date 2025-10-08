@@ -141,22 +141,25 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
         extractedText = file.buffer.toString("utf8");
       }
 
-      if (extractedText && extractedText.trim()) {
-        try {
-          const embedding = await embedText(extractedText);
-          await fileCol.insertOne({
-            name: uniqueName,
-            url: fileUrl,
-            text: extractedText,
-            vector: embedding,
-            uploadedAt: new Date(),
-          });
-        } catch (e) {
-          console.error("❌ Indexing uploaded file failed (embedding):", e);
+      try {
+        const embedding = await embedText(extractedText);
+        if (!Array.isArray(embedding) || embedding.length === 0) {
+          throw new Error("Embedding is empty or invalid");
         }
-      } else {
-        console.warn("⚠️ Uploaded file has no extracted text:", uniqueName);
+
+        const result = await fileCol.insertOne({
+          name: uniqueName,
+          url: fileUrl,
+          text: extractedText,
+          vector: embedding,
+          uploadedAt: new Date(),
+        });
+
+        console.log("✅ Inserted file with _id:", result.insertedId);
+      } catch (e) {
+        console.error("❌ Indexing uploaded file failed (embedding or DB):", e);
       }
+
 
       uploadedUrls.push(fileUrl);
     }
