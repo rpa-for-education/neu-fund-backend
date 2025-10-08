@@ -79,10 +79,12 @@ app.use(express.json({ limit: "10mb" }));
 const upload = multer({ storage: multer.memoryStorage() });
 
 (async () => {
-  try {
-    await initEmbedding();
-  } catch (e) {
-    console.error("⚠️ initEmbedding failed at startup:", e);
+  if (!process.env.VERCEL) {
+    try {
+      await initEmbedding();
+    } catch (e) {
+      console.error("⚠️ initEmbedding failed at startup:", e);
+    }
   }
 })();
 

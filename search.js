@@ -36,33 +36,31 @@ let embedder = null;
  * If it fails, we throw — you requested no remote fallback.
  */
 export async function initEmbedding() {
-  if (embedder) return true;
-
+  if (embedder || usingRemoteEmbed) return true;
+  if (String(process.env.USE_REMOTE_EMBEDDING || "").toLowerCase() === "true") {
+    usingRemoteEmbed = true;
+    console.info("ℹ️ Using remote embedding (forced by USE_REMOTE_EMBEDDING=true)");
+    return true;
+  }
   const model = process.env.EMBEDDING_MODEL || "Xenova/paraphrase-multilingual-mpnet-base-v2";
   const modelName = model.startsWith("Xenova/") ? model : `Xenova/${model}`;
-
   try {
     console.log(`⏳ Attempting to load JS embedding model: ${modelName}`);
-
-    // dynamic import
     const transformers = await import("@xenova/transformers");
     try {
       if (transformers && transformers.env) {
         transformers.env.cacheDir = process.env.TRANSFORMERS_CACHE || "/tmp/transformers_cache";
         transformers.env.useFSCache = true;
       }
-    } catch (ee) {
-      // ignore
-    }
-
+    } catch (ee) { }
     const { pipeline } = transformers;
     embedder = await pipeline("feature-extraction", modelName);
     console.log("✅ Embedder ready (local Xenova)");
     return true;
   } catch (err) {
-    console.error("❌ initEmbedding failed (local only):", err);
-    // Since we do not want remote fallback, throw here so caller knows embedding not available
-    throw new Error(`Failed to initialize local embedder: ${err?.message || err}`);
+    console.warn("⚠️ Failed to init local embedder, will fallback to remote embeddings if available.", err?.message || err);
+    usingRemoteEmbed = true;
+    return true;
   }
 }
 
@@ -70,22 +68,28 @@ export async function initEmbedding() {
  * Sinh vector embedding từ text — chỉ dùng local embedder.
  */
 async function embed(text) {
-  if (!embedder) {
-    await initEmbedding(); // may throw
+  if (!embedder && !usingRemoteEmbed) {
+    await initEmbedding();
   }
-
+  if (embedder) {
+    try {
+      const out = await embedder(text, { pooling: "mean", normalize: true });
+      return Array.from(out.data);
+    } catch (e) {
+      console.warn("⚠️ Local embedder failed during embed(), switching to remote:", e?.message || e);
+      usingRemoteEmbed = true;
+      embedder = null;
+    }
+  }
   try {
-    const out = await embedder(text, { pooling: "mean", normalize: true });
-    return Array.from(out.data);
+    return await remoteEmbeddingOpenAI(text);
   } catch (e) {
-    console.error("❌ Local embedder failed during embed():", e);
-    // do not fallback to remote — throw so caller can handle
+    console.error("❌ Remote embedding also failed:", e?.message || e);
     throw e;
   }
 }
 
 export async function embedText(text) {
-  if (!text || !String(text).trim()) return [];
   return embed(text);
 }
 
