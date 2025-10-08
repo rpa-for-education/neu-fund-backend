@@ -301,52 +301,49 @@ app.post("/api/agent", async (req, res) => {
       hits = hits.map(
         ({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest
       );
-
       const queryVec = await embedText(question);
-
-      // Sau khi tạo vector embedding:
       console.log(">>> session_id before vector search:", req.body.session_id);
       console.log(">>> query vector length:", queryVec.length);
 
-      fileHits = await fileCol.aggregate([
-        {
-          $vectorSearch: {
-            index: process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files",
-            path: "vector",
-            queryVector: queryVec,
-            numCandidates: Math.max(50, k * 10),
-            limit: k,
-            similarity: "cosine",
+      try {
+        fileHits = await fileCol.aggregate([
+          {
+            $vectorSearch: {
+              index: process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files",
+              path: "vector",
+              queryVector: queryVec,
+              numCandidates: Math.max(50, k * 10),
+              limit: k,
+              similarity: "cosine",
+            },
           },
-        },
-        {
-          $project: {
-            vector: 0,
-            score: { $meta: "vectorSearchScore" },
+          {
+            $project: {
+              vector: 0,
+              score: { $meta: "vectorSearchScore" },
+            },
           },
-        },
-      ]).toArray();
+        ]).toArray();
 
-      if (fileHits && fileHits.length > 0) {
-        fileContext = fileHits
-          .map((f, i) => {
-            const snippet = (f.text || "").replace(/\s+/g, " ").slice(0, 600);
-            return `${i + 1}. ${f.name || "(no name)"} - ${f.url}\n${snippet}${snippet.length < (f.text || "").length ? "..." : ""}\n`;
-          })
-          .join("\n");
-      }
-
+        if (fileHits && fileHits.length > 0) {
+          fileContext = fileHits
+            .map((f, i) => {
+              const snippet = (f.text || "").replace(/\s+/g, " ").slice(0, 600);
+              return `${i + 1}. ${f.name || "(no name)"} - ${f.url}\n${snippet}${snippet.length < (f.text || "").length ? "..." : ""}\n`;
+            })
+            .join("\n");
+        }
       } catch (fileSearchErr) {
         console.warn("⚠️ uploaded_files vector search failed:", fileSearchErr?.message || fileSearchErr);
       }
-
-      // Sau khi lọc theo sessionId:
+      // Tiếp tục xử lý...
       console.log(">>> filtered fileHits count:", fileHits.length);
     } catch (e) {
       hits = [];
       fileHits = [];
       fileContext = "";
     }
+
 
     let memoryEntries = [];
     if (Array.isArray(req.body.chat_history)) {
