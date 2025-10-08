@@ -51,6 +51,30 @@ function buildSearchFilter(q, fields = []) {
   return { $or: fields.map((f) => ({ [f]: regex })) };
 }
 
+
+function buildPrompt(question, funds = []) {
+  let context = "Bạn là trợ lý học thuật, trả lời ngắn gọn, trích dẫn tên quỹ tài trợ nghiên cứu liên quan.\n\n";
+
+  if (funds.length) {
+    context += "Danh sách quỹ tài trợ nghiên cứu:\n";
+    funds.slice(0, 10).forEach((c, i) => {
+      context += `Quỹ ${i + 1}:
+    - Tên: ${c["OPPORTUNITY TITLE"] || "Không có"}
+    - Lĩnh vực: ${c["CATEGORY OF FUNDING ACTIVITY"] || "Không có"}
+    - Hình thức: ${c["FUNDING INSTRUMENT TYPE"] || "Không có"}
+    - Mô tả: ${c["FUNDING DESCRIPTION"] || "Không có"}
+    - Đối tượng: ${c["ELIGIBLE APPLICANTS"] || "Không có"}
+    - Link: ${c["LINK TO ADDITIONAL INFORMATION"] || c.url || "Không có"}
+    `;
+    });
+  } else {
+    context += "Không có quỹ tài trợ nghiên cứu phù hợp.\n\n";
+  }
+
+  context += `\nCâu hỏi: ${question}\n\n`;
+  return context;
+}
+
 // MongoClient singleton
 let mongoClient = null;
 let db = null;
@@ -195,7 +219,14 @@ app.get("/api/funds", async (req, res) => {
   try {
     const { q } = req.query;
     const { limit, skip, page } = getPagination(req);
-    const filter = buildSearchFilter(q, ["OPPORTUNITY TITLE", "OPPORTUNITY URL", "_key"]);
+    const filter = buildSearchFilter(q, [
+        "OPPORTUNITY TITLE", 
+        "CATEGORY OF FUNDING ACTIVITY", 
+        "FUNDING INSTRUMENT TYPE", 
+        "FUNDING DESCRIPTION", 
+        "ELIGIBLE APPLICANTS",
+        "LINK TO ADDITIONAL INFORMATION", 
+        "_key"]);
     const db = await getDb();
     const col = db.collection(MONGO_COLLECTION);
 
@@ -295,6 +326,12 @@ app.post("/api/agent", async (req, res) => {
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
     }
 
+    try {
+      funds = await fundVectorSearch(question, Number(k));
+    } catch (e) {
+      console.error("fundVectorSearch error:", e);
+    }
+
     const resolvedModel = model_id || "qwen-max";
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
     let hits = [];
@@ -380,8 +417,11 @@ app.post("/api/agent", async (req, res) => {
       fileContext = `Dưới đây là các file người dùng đã tải lên có liên quan:\n${fileContext}\n\n`;
     }
 
+
+    const contextPrompt = buildPrompt(question, funds);
+
     const promptText = `
-Người dùng hỏi: "${question}"
+Người dùng hỏi: "${contextPrompt}"
 
 
 ${memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n" : ""}

@@ -235,6 +235,44 @@ export async function fundVectorSearch(query, topk = 5) {
   }));
 }
 
+export async function search({ question, topk = 5 }) {
+  await client.connect();
+  const dbCli = client.db(dbName);
+  const queryVector = await embed(question);
+  const safeTopK = Math.min(Number(topk) || 5, MAX_TOPK);
+
+  const fundResults = await dbCli.collection("fund").aggregate([
+    {
+      $vectorSearch: {
+        index: "vector_index_fund",
+        path: "vector",
+        queryVector,
+        numCandidates: 100,
+        limit: safeTopK,
+        similarity: "cosine",
+      },
+    },
+    {
+      $project: {
+        _id: 0,
+        vector: 0,
+        created_time: 0,
+        modified_time: 0,
+        score: { $meta: "vectorSearchScore" },
+      },
+    },
+  ]).toArray();
+
+  return {
+    fund: fundResults,
+  };
+}
+
+export async function fundVectorSearch(question, topk = 5) {
+  const result = await search({ question, topk });
+  return result.fund;
+}
+
 // Thêm hàm tìm kiếm vector file upload
 const FILES_COLLECTION = process.env.FILES_COLLECTION || "uploaded_files";
 const VECTOR_INDEX_UPLOADED_FILES = "vector_index_uploaded_files";
