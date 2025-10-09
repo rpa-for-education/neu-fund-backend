@@ -177,7 +177,6 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
         console.error("❌ Indexing uploaded file failed (embedding or DB):", e);
       }
 
-
       uploadedUrls.push(fileUrl);
     }
 
