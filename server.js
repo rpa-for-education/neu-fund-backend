@@ -123,6 +123,7 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
       const prefix = userEmail || folder || "";
       const key = prefix ? `${prefix}/${uniqueName}` : uniqueName;
 
+      
       try {
         await s3Client.send(
           new PutObjectCommand({
@@ -175,7 +176,7 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
         console.log("✅ Inserted file with _id:", result.insertedId);
       } catch (e) {
         console.error("❌ Indexing uploaded file failed (embedding or DB):", e);
-      }
+      }x
 
       uploadedUrls.push(fileUrl);
     }
