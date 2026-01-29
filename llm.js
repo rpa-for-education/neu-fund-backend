@@ -40,10 +40,29 @@ async function callOpenAI(prompt, model) {
 }
 */
 /* Phiên bản mới POST /v1/responses */
-async function callOpenAI(prompt, model) {
-  const timeout =
-    model.startsWith("gpt-5") ? 60000 : 30000;
+function extractOpenAIText(data) {
+  // shortcut (GPT-4.1 thường có)
+  if (data.output_text) return data.output_text;
 
+  // fallback chuẩn cho GPT-5
+  const output = data.output || [];
+
+  let text = "";
+
+  for (const item of output) {
+    if (!item.content) continue;
+
+    for (const c of item.content) {
+      if (c.type === "output_text" && c.text) {
+        text += c.text;
+      }
+    }
+  }
+
+  return text;
+}
+
+async function callOpenAI(prompt, model) {
   const res = await axios.post(
     "https://api.openai.com/v1/responses",
     {
@@ -55,16 +74,14 @@ async function callOpenAI(prompt, model) {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
-      timeout,
+      timeout: model.startsWith("gpt-5") ? 90000 : 30000,
     }
   );
 
-  return (
-    res.data.output_text ||
-    res.data.output?.[0]?.content?.[0]?.text ||
-    ""
-  );
+  return extractOpenAIText(res.data);
 }
+
+
 // ===== Gemini =====
 /* Phiên bản cũ Gemini
 async function callGemini(prompt, model) {
