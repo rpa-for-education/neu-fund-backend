@@ -41,6 +41,9 @@ async function callOpenAI(prompt, model) {
 */
 /* Phiên bản mới POST /v1/responses */
 async function callOpenAI(prompt, model) {
+  const timeout =
+    model.startsWith("gpt-5") ? 60000 : 30000;
+
   const res = await axios.post(
     "https://api.openai.com/v1/responses",
     {
@@ -52,7 +55,7 @@ async function callOpenAI(prompt, model) {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
-      timeout: 30000,
+      timeout,
     }
   );
 
