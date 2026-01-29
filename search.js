@@ -7,7 +7,7 @@ process.env.XDG_CACHE_HOME = process.env.XDG_CACHE_HOME || "/tmp";
 process.env.TMPDIR = process.env.TMPDIR || "/tmp";
 process.env.HOME = process.env.HOME || "/tmp";
 
-import { MongoClient } from "mongodb";
+//// import { MongoClient } from "mongodb";
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
@@ -16,8 +16,8 @@ import * as docx from "docx-parser";
 import mammoth from "mammoth";
 import { getDb } from "./db.js";
 
-const client = new MongoClient(process.env.MONGO_URI);
-const dbName = process.env.MONGO_DB || "fitneu";
+//// const client = new MongoClient(process.env.MONGO_URI);
+//// const dbName = process.env.MONGO_DB || "fitneu";
 
 // Giới hạn topK (có thể cấu hình qua .env)
 const MAX_TOPK = parseInt(process.env.MAX_TOPK || "30", 10);
@@ -197,42 +197,37 @@ export async function uploadAndIndexFile(filePathOrUrl) {
  */
 
 export async function search({ question, topk = 5 }) {
-  await client.connect();
-  const dbCli = client.db(dbName);
+  const db = await getDb();
+
   const queryVector = await embed(question);
   const safeTopK = Math.min(Number(topk) || 5, MAX_TOPK);
 
-  const fundResults = await dbCli.collection("fund").aggregate([
+  const fundResults = await db.collection(MONGO_COLLECTION).aggregate([
     {
       $vectorSearch: {
-        index: "vector_index_fund",
-        path: "vector",
+        index: VECTOR_INDEX_NAME,
+        path: VECTOR_PATH,
         queryVector,
-        numCandidates: 100,
+        numCandidates: Math.max(50, safeTopK * 10),
         limit: safeTopK,
         similarity: "cosine",
       },
     },
     {
       $project: {
-        _id: 0,
         vector: 0,
-        created_time: 0,
-        modified_time: 0,
         score: { $meta: "vectorSearchScore" },
       },
     },
   ]).toArray();
 
-  return {
-    fund: fundResults,
-  };
+  return fundResults;
 }
 
 export async function fundVectorSearch(question, topk = 5) {
-  const result = await search({ question, topk });
-  return result.fund;
+  return await search({ question, topk });
 }
+
 
 // Thêm hàm tìm kiếm vector file upload
 const FILES_COLLECTION = process.env.FILES_COLLECTION || "uploaded_files";
