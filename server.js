@@ -2,23 +2,16 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
-import fs from "fs";
-import mammoth from "mammoth";
-import fetch from "node-fetch";
-
-import { ObjectId, MongoClient } from "mongodb";
 import { callLLM } from "./llm.js";
 import { encode } from "gpt-tokenizer";
 import {
-  fundVectorSearch,
-  readFileContent,
   initEmbedding,
   embedText,
-  uploadedFilesVectorSearch
+  fundVectorSearchByVector,
+  uploadedFilesVectorSearchByVector
 } from "./search.js";
 
-import { readDocxFromUrl } from "./search.js";
-import { addToMemory, getMemory } from "./memory.js";
+import { MongoClient } from "mongodb";
 import { s3Client } from "./s3.js";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 
@@ -176,7 +169,7 @@ app.post("/api/upload", upload.array("file"), async (req, res) => {
         console.log("✅ Inserted file with _id:", result.insertedId);
       } catch (e) {
         console.error("❌ Indexing uploaded file failed (embedding or DB):", e);
-      }x
+      }
 
       uploadedUrls.push(fileUrl);
     }
@@ -317,49 +310,37 @@ app.post("/api/agent", async (req, res) => {
       return res.status(400).json({ error: "Missing 'question' or 'prompt'" });
     }
 
-    const resolvedModel = model_id || "qwen-max";
+    const resolvedModel = model_id || "gpt-smart";
     const k = Math.max(1, Math.min(parseInt(topk, 10) || 5, 50));
+    const queryVec = await embedText(question);
+    if (!Array.isArray(queryVec) || queryVec.length === 0) {
+      return res.json({
+        answer: "Câu hỏi không hợp lệ để tìm kiếm dữ liệu.",
+        retrieved: { fund: [], files: [] },
+      });
+    }
+
+    
     let hits = [];
     let fileHits = [];
     let fileContext = "";
     let funds = [];
 
-
-
     try {
-      funds = await fundVectorSearch(question, Number(k));
-    } catch (e) {
-      console.error("fundVectorSearch error:", e);
-    }
-
-    try {
-      hits = await fundVectorSearch(question, k);
+      hits = await fundVectorSearchByVector(queryVec, k);
+      funds = hits;
       hits = hits.map(
         ({ VECTOR, vector, score, ["OPPORTUNITY NUMBER"]: _, ...rest }) => rest
       );
-      const queryVec = await embedText(question);
       console.log(">>> session_id before vector search:", req.body.session_id);
-      console.log(">>> query vector length:", queryVec.length);
+      // console.log(">>> query vector length:", queryVec.length);
 
       try {
-        fileHits = await fileCol.aggregate([
-          {
-            $vectorSearch: {
-              index: process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files",
-              path: "vector",
-              queryVector: queryVec,
-              numCandidates: Math.max(50, k * 10),
-              limit: k,
-              similarity: "cosine",
-            },
-          },
-          {
-            $project: {
-              vector: 0,
-              score: { $meta: "vectorSearchScore" },
-            },
-          },
-        ]).toArray();
+        try {
+          fileHits = await uploadedFilesVectorSearchByVector(queryVec, k);
+        } catch (e) {
+          console.warn("⚠️ uploaded files vector search failed:", e?.message || e);
+        }
 
         if (fileHits && fileHits.length > 0) {
           fileContext = fileHits
@@ -415,17 +396,18 @@ app.post("/api/agent", async (req, res) => {
     const contextPrompt = buildPrompt(question, funds);
 
     const promptText = `
-Người dùng hỏi: "${contextPrompt}"
+    ${contextPrompt}
 
+    ${memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n" : ""}
 
-${memoryText ? "Ngữ cảnh hội thoại gần đây:\n" + memoryText + "\n\n" : ""}
-Dưới đây là danh sách quỹ có liên quan:
-${contextText}
+    Dưới đây là danh sách quỹ có liên quan:
+    ${contextText}
 
+    ${fileContext}
+    Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và đường dẫn.
+    Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy dữ liệu phù hợp".
+    `;
 
-${fileContext}Hãy trả lời bằng tiếng Việt, trích dẫn tên quỹ hoặc file và đường dẫn.
-Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm thấy dữ liệu phù hợp".
-`;
 
 
     console.log("=== PROMPT ===\n", promptText, "\n=== END PROMPT ===");

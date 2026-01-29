@@ -1,5 +1,3 @@
-// Kết hợp logic tìm kiếm (conference/journal), đọc file, embedding (local Xenova only)
-
 process.env.TRANSFORMERS_CACHE = process.env.TRANSFORMERS_CACHE || "/tmp/transformers_cache";
 process.env.HF_HUB_CACHE = process.env.HF_HUB_CACHE || "/tmp/hf_hub_cache";
 process.env.HF_HOME = process.env.HF_HOME || "/tmp/hf_home";
@@ -7,17 +5,12 @@ process.env.XDG_CACHE_HOME = process.env.XDG_CACHE_HOME || "/tmp";
 process.env.TMPDIR = process.env.TMPDIR || "/tmp";
 process.env.HOME = process.env.HOME || "/tmp";
 
-//// import { MongoClient } from "mongodb";
 import fs from "fs/promises";
-import fsSync from "fs";
 import path from "path";
 import fetch from "node-fetch";
 import * as docx from "docx-parser";
 import mammoth from "mammoth";
 import { getDb } from "./db.js";
-
-//// const client = new MongoClient(process.env.MONGO_URI);
-//// const dbName = process.env.MONGO_DB || "fitneu";
 
 // Giới hạn topK (có thể cấu hình qua .env)
 const MAX_TOPK = parseInt(process.env.MAX_TOPK || "30", 10);
@@ -30,65 +23,68 @@ const MONGO_COLLECTION = process.env.MONGO_COLLECTION || "fund";
 const UPLOADED_FILES_INDEX = process.env.UPLOADED_FILES_INDEX || "vector_index_uploaded_files";
 
 let embedder = null;
-let usingRemoteEmbed = false;
+let embeddingInitPromise = null;
 
 /**
- * Initialize local Xenova embedder only.
- * If it fails, we throw — you requested no remote fallback.
+ * Initialize local Xenova embedder (local only).
+ * No remote embedding fallback is allowed.
  */
 export async function initEmbedding() {
-  if (embedder || usingRemoteEmbed) return true;
-  if (String(process.env.USE_REMOTE_EMBEDDING || "").toLowerCase() === "true") {
-    usingRemoteEmbed = true;
-    console.info("ℹ️ Using remote embedding (forced by USE_REMOTE_EMBEDDING=true)");
-    return true;
-  }
-  const model = process.env.EMBEDDING_MODEL || "Xenova/paraphrase-multilingual-mpnet-base-v2";
-  const modelName = model.startsWith("Xenova/") ? model : `Xenova/${model}`;
-  try {
-    console.log(`⏳ Attempting to load JS embedding model: ${modelName}`);
-    const transformers = await import("@xenova/transformers");
-    try {
-      if (transformers && transformers.env) {
-        transformers.env.cacheDir = process.env.TRANSFORMERS_CACHE || "/tmp/transformers_cache";
+  if (embedder) return true;
+
+  if (!embeddingInitPromise) {
+    embeddingInitPromise = (async () => {
+      const model =
+        process.env.EMBEDDING_MODEL ||
+        "Xenova/paraphrase-multilingual-mpnet-base-v2";
+
+      const modelName = model.startsWith("Xenova/")
+        ? model
+        : `Xenova/${model}`;
+
+      console.log(`⏳ Loading embedding model: ${modelName}`);
+
+      const transformers = await import("@xenova/transformers");
+
+      if (transformers?.env) {
+        transformers.env.cacheDir =
+          process.env.TRANSFORMERS_CACHE || "/tmp/transformers_cache";
         transformers.env.useFSCache = true;
       }
-    } catch (ee) { }
-    const { pipeline } = transformers;
-    embedder = await pipeline("feature-extraction", modelName);
-    console.log("✅ Embedder ready (local Xenova)");
-    return true;
-  } catch (err) {
-    console.warn("⚠️ Failed to init local embedder, will fallback to remote embeddings if available.", err?.message || err);
-    usingRemoteEmbed = true;
-    return true;
+
+      const { pipeline } = transformers;
+      embedder = await pipeline("feature-extraction", modelName);
+
+      console.log("✅ Embedder ready (local Xenova)");
+    })();
   }
+
+  await embeddingInitPromise;
+  return true;
 }
+
 
 /**
  * Sinh vector embedding từ text — chỉ dùng local embedder.
  */
 async function embed(text) {
-  if (!embedder && !usingRemoteEmbed) {
+  if (!embedder) {
     await initEmbedding();
   }
-  if (embedder) {
-    try {
-      const out = await embedder(text, { pooling: "mean", normalize: true });
-      return Array.from(out.data);
-    } catch (e) {
-      console.warn("⚠️ Local embedder failed during embed(), switching to remote:", e?.message || e);
-      usingRemoteEmbed = true;
-      embedder = null;
-    }
+
+  if (!embedder) {
+    throw new Error("Embedder failed to initialize");
   }
-  try {
-    return await remoteEmbeddingOpenAI(text);
-  } catch (e) {
-    console.error("❌ Remote embedding also failed:", e?.message || e);
-    throw e;
-  }
+
+  const out = await embedder(text, {
+    pooling: "mean",
+    normalize: true,
+  });
+
+  return Array.from(out.data);
 }
+
+
 
 export async function embedText(text) {
   return embed(text);
@@ -192,46 +188,19 @@ export async function uploadAndIndexFile(filePathOrUrl) {
   return result;
 }
 
-/**
- * Vector search trên collection 'fund'
- */
 
-export async function search({ question, topk = 5 }) {
-  const db = await getDb();
 
-  const queryVector = await embed(question);
-  const safeTopK = Math.min(Number(topk) || 5, MAX_TOPK);
-
-  const fundResults = await db.collection(MONGO_COLLECTION).aggregate([
-    {
-      $vectorSearch: {
-        index: VECTOR_INDEX_NAME,
-        path: VECTOR_PATH,
-        queryVector,
-        numCandidates: Math.max(50, safeTopK * 10),
-        limit: safeTopK,
-        similarity: "cosine",
-      },
-    },
-    {
-      $project: {
-        vector: 0,
-        score: { $meta: "vectorSearchScore" },
-      },
-    },
-  ]).toArray();
-
-  return fundResults;
-}
-
+/*
 export async function fundVectorSearch(question, topk = 5) {
   return await search({ question, topk });
 }
+*/
 
 
 // Thêm hàm tìm kiếm vector file upload
 const FILES_COLLECTION = process.env.FILES_COLLECTION || "uploaded_files";
 const VECTOR_INDEX_UPLOADED_FILES = "vector_index_uploaded_files";
+/*
 export async function uploadedFilesVectorSearch(query, topk = 5) {
   const db = await getDb();
   const col = db.collection(FILES_COLLECTION);
@@ -266,3 +235,65 @@ export async function uploadedFilesVectorSearch(query, topk = 5) {
     _id: String(d._id)
   }));
 }
+*/
+
+export async function fundVectorSearchByVector(queryVector, topk = 5) {
+  const db = await getDb();
+  const safeTopK = Math.min(Number(topk) || 5, MAX_TOPK);
+
+  return await db.collection(MONGO_COLLECTION).aggregate([
+    {
+      $vectorSearch: {
+        index: VECTOR_INDEX_NAME,
+        path: VECTOR_PATH,
+        queryVector,
+        numCandidates: Math.max(50, safeTopK * 10),
+        limit: safeTopK,
+        similarity: "cosine",
+      },
+    },
+    {
+      $project: {
+        vector: 0,
+        score: { $meta: "vectorSearchScore" },
+      },
+    },
+  ]).toArray();
+}
+
+export async function uploadedFilesVectorSearchByVector(queryVector, topk = 5) {
+  const db = await getDb();
+  const col = db.collection(FILES_COLLECTION);
+  const safeTopK = Math.min(Number(topk) || 5, MAX_TOPK);
+
+  const pipeline = [
+    {
+      $vectorSearch: {
+        index: VECTOR_INDEX_UPLOADED_FILES,
+        path: "vector",
+        queryVector,
+        numCandidates: safeTopK * 10,
+        limit: safeTopK,
+        similarity: "cosine",
+      },
+    },
+    {
+      $project: {
+        vector: 0,
+        name: 1,
+        text: 1,
+        url: 1,
+        uploadedAt: 1,
+        score: { $meta: "vectorSearchScore" },
+      },
+    },
+  ];
+
+  const results = await col.aggregate(pipeline).toArray();
+
+  return results.map(d => ({
+    ...d,
+    _id: String(d._id),
+  }));
+}
+
