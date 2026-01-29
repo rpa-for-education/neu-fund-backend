@@ -478,16 +478,16 @@ Nếu không có dữ liệu phù hợp thì hãy nói rõ ràng "Không tìm th
       });
     } catch (e) {}
 
-
     return res.json({
       sessionId: sid,
       isNewSession,
       model_id: resolvedModel,
-      answer: { answer: text, model: resolvedModel, provider },
+      answer: llmRes,
       retrieved: { fund: hits, files: fileHits },
       memory: { entries_count: memoryEntries.length },
       meta: { response_time_ms, tokens_used, prompt_tokens, answer_tokens },
     });
+
   } catch (err) {
     console.error("❌ Unhandled error in /api/agent:", err);
     return res.status(500).json({ error: err.message || "Internal error" });
