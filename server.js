@@ -45,27 +45,98 @@ function buildSearchFilter(q, fields = []) {
 
 
 function buildPrompt(question, funds = []) {
-  let context = "Bạn là trợ lý học thuật, trả lời ngắn gọn, trích dẫn tên quỹ tài trợ nghiên cứu liên quan.\n\n";
+  let context = `
+BẠN LÀ AI AGENT TƯ VẤN HỌC THUẬT
+CHUYÊN VỀ QUỸ TÀI TRỢ NGHIÊN CỨU KHOA HỌC
 
-  if (funds.length) {
-    context += "Danh sách quỹ tài trợ nghiên cứu:\n";
-    funds.slice(0, 10).forEach((c, i) => {
-      context += `Quỹ ${i + 1}:
-    - Tên: ${c["OPPORTUNITY TITLE"] || "Không có"}
-    - Lĩnh vực: ${c["CATEGORY OF FUNDING ACTIVITY"] || "Không có"}
-    - Hình thức: ${c["FUNDING INSTRUMENT TYPE"] || "Không có"}
-    - Mô tả: ${c["FUNDING DESCRIPTION"] || "Không có"}
-    - Đối tượng: ${c["ELIGIBLE APPLICANTS"] || "Không có"}
-    - Link: ${c["LINK TO ADDITIONAL INFORMATION"] || c.url || "Không có"}
-    `;
+ĐỐI TƯỢNG PHỤC VỤ:
+- Giảng viên đại học
+- Nghiên cứu sinh
+- Nhóm nghiên cứu
+- Nhà khoa học trẻ
+
+MỤC TIÊU:
+- Tư vấn lựa chọn quỹ tài trợ nghiên cứu phù hợp với đề tài và đối tượng
+
+NGUYÊN TẮC BẮT BUỘC (KHÔNG ĐƯỢC VI PHẠM):
+1. Chỉ sử dụng dữ liệu quỹ được cung cấp bên dưới
+2. Không sử dụng kiến thức bên ngoài
+3. Không bịa quỹ tài trợ
+4. Không suy đoán điều kiện, hạn mức, hay cơ hội trúng tuyển
+5. Nếu dữ liệu không đủ → phải nói rõ
+
+CÂU TRẢ LỜI CHỈ ĐƯỢC PHÉP DỰA TRÊN DỮ LIỆU SAU
+`;
+
+  // =====================
+  // FUNDS
+  // =====================
+  if (funds.length > 0) {
+    context += `
+================================
+DANH SÁCH QUỸ TÀI TRỢ NGHIÊN CỨU
+================================
+`;
+    funds.slice(0, 10).forEach((f, i) => {
+      context += `
+[F${i + 1}]
+Tên quỹ: ${f["OPPORTUNITY TITLE"] || "Không có"}
+Lĩnh vực tài trợ: ${f["CATEGORY OF FUNDING ACTIVITY"] || "Không có"}
+Hình thức tài trợ: ${f["FUNDING INSTRUMENT TYPE"] || "Không có"}
+Mô tả quỹ: ${f["FUNDING DESCRIPTION"] || "Không có"}
+Đối tượng đủ điều kiện: ${f["ELIGIBLE APPLICANTS"] || "Không có"}
+Link thông tin chính thức: ${f["LINK TO ADDITIONAL INFORMATION"] || f.url || "Không có"}
+`;
     });
   } else {
-    context += "Không có quỹ tài trợ nghiên cứu phù hợp.\n\n";
+    context += `
+================================
+DANH SÁCH QUỸ TÀI TRỢ NGHIÊN CỨU
+================================
+Không có quỹ tài trợ phù hợp trong dữ liệu hiện tại.
+`;
   }
 
-  context += `\nCâu hỏi: ${question}\n\n`;
+  // =====================
+  // QUESTION & OUTPUT CONTRACT
+  // =====================
+  context += `
+================================
+CÂU HỎI
+================================
+${question}
+
+================================
+YÊU CẦU BẮT BUỘC VỀ CÂU TRẢ LỜI
+================================
+- Trả lời bằng tiếng Việt
+- Văn phong học thuật
+- Rõ ràng, súc tích, không lan man
+
+BẮT BUỘC TRÍCH DẪN:
+- Khi đề cập quỹ → phải trích dẫn [F1], [F2], ...
+- Mỗi quỹ được đề cập PHẢI kèm link chính thức (click được)
+
+BẮT BUỘC CUỐI CÂU TRẢ LỜI:
+- Phải có mục "Nguồn tham khảo"
+- Mỗi [Fx] phải liệt kê đúng link tương ứng
+- KHÔNG được gộp link, KHÔNG được viết chung chung
+
+CẤU TRÚC CÂU TRẢ LỜI PHẢI THEO:
+1. Nhận định tổng quan
+2. Phân tích / tư vấn cụ thể (kèm trích dẫn)
+3. Kết luận ngắn gọn
+4. Nguồn tham khảo
+
+KHÔNG ĐƯỢC:
+- Suy đoán khả năng được tài trợ
+- Bịa điều kiện tài trợ
+- Viết ngoài dữ liệu được cung cấp
+`;
+
   return context;
 }
+
 
 // MongoClient singleton
 let mongoClient = null;
