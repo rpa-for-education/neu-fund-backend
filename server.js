@@ -62,7 +62,7 @@ NGUYÊN TẮC BẮT BUỘC (KHÔNG ĐƯỢC VI PHẠM):
 1. Chỉ sử dụng dữ liệu quỹ được cung cấp bên dưới
 2. Không sử dụng kiến thức bên ngoài
 3. Không bịa quỹ tài trợ
-4. Không suy đoán điều kiện, hạn mức hay khả năng trúng tuyển
+4. Không suy đoán điều kiện, hạn mức, hay cơ hội trúng tuyển
 5. Nếu dữ liệu không đủ → phải nói rõ
 
 CÂU TRẢ LỜI CHỈ ĐƯỢC PHÉP DỰA TRÊN DỮ LIỆU SAU
@@ -107,16 +107,7 @@ CÂU HỎI
 ${question}
 
 ================================
-YÊU CẦU TRÌNH BÀY (BẮT BUỘC TUÂN THỦ)
-================================
-- BẮT BUỘC sử dụng Markdown
-- TẤT CẢ đề mục chính PHẢI in đậm bằng **Markdown**
-- MỖI đề mục chính PHẢI xuống dòng rõ ràng
-- KHÔNG được gộp các đề mục vào cùng một đoạn
-- KHÔNG dùng emoji, ký hiệu trang trí, hoặc văn phong quảng cáo
-
-================================
-YÊU CẦU BẮT BUỘC VỀ NỘI DUNG
+YÊU CẦU BẮT BUỘC VỀ CÂU TRẢ LỜI
 ================================
 - Trả lời bằng tiếng Việt
 - Văn phong học thuật
@@ -127,24 +118,26 @@ BẮT BUỘC TRÍCH DẪN:
 - Mỗi quỹ được đề cập PHẢI kèm link chính thức (click được)
 
 BẮT BUỘC CUỐI CÂU TRẢ LỜI:
-- Phải có mục **Nguồn tham khảo**
+- Phải có mục "Nguồn tham khảo"
 - Mỗi [Fx] phải liệt kê đúng link tương ứng
-- KHÔNG được gộp link
-- KHÔNG được viết chung chung
+- KHÔNG được gộp link, KHÔNG được viết chung chung
 
-CẤU TRÚC CÂU TRẢ LỜI PHẢI THEO ĐÚNG THỨ TỰ:
-**1. Nhận định tổng quan**
+CẤU TRÚC CÂU TRẢ LỜI PHẢI THEO:
+1. Nhận định tổng quan
+2. Phân tích / tư vấn cụ thể (kèm trích dẫn)
+3. Kết luận ngắn gọn
+4. Nguồn tham khảo
 
-**2. Phân tích / tư vấn cụ thể**
-
-**3. Kết luận**
-
-**4. Nguồn tham khảo**
+YÊU CẦU TRÌNH BÀY:
+- BẮT BUỘC dùng Markdown
+- Đề mục chính PHẢI in đậm (**)
+- Mỗi đề mục chính xuống dòng rõ ràng
+- Không gộp các đề mục
 
 KHÔNG ĐƯỢC:
-- Suy đoán
+- Suy đoán khả năng được tài trợ
+- Bịa điều kiện tài trợ
 - Viết ngoài dữ liệu được cung cấp
-- Thêm quỹ không tồn tại
 `;
 
   return context;
