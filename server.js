@@ -131,7 +131,8 @@ CẤU TRÚC CÂU TRẢ LỜI PHẢI THEO:
 YÊU CẦU TRÌNH BÀY:
 - BẮT BUỘC dùng Markdown
 - Đề mục chính PHẢI in đậm (**)
-- Mỗi đề mục chính xuống dòng rõ ràng
+- Mỗi đề mục chính xuống dòng mới
+- Phần Phân tích / tư vấn cụ thể (kèm trích dẫn) cần có gạch đầu dòng nhìn cho dễ đọc
 - Không gộp các đề mục
 
 KHÔNG ĐƯỢC:
