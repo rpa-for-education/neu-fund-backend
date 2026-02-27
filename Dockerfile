@@ -1,20 +1,25 @@
-# === Base image: Debian + glibc (BẮT BUỘC cho AI / ONNX) ===
 FROM node:20-bookworm-slim
 
-# === Set working directory ===
+# === CÀI SYSTEM DEPENDENCIES CHO SHARP ===
+RUN apt-get update && apt-get install -y \
+    libvips-dev \
+    build-essential \
+    python3 \
+    pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# === Copy package files trước để cache dependency ===
 COPY package*.json ./
 
-# === Install Node dependencies ===
+# === ÉP SHARP BUILD FROM SOURCE, KHÔNG DOWNLOAD BINARY ===
+ENV SHARP_IGNORE_GLOBAL_LIBVIPS=0
+ENV SHARP_FORCE_GLOBAL_LIBVIPS=1
+ENV npm_config_build_from_source=true
+
 RUN npm ci
 
-# === Copy toàn bộ source code ===
 COPY . .
 
-# === Expose API port (đổi nếu server.js listen khác 4000) ===
 EXPOSE 4000
-
-# === Run AI / API server ===
 CMD ["node", "server.js"]
