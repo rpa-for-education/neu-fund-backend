@@ -21,5 +21,5 @@ RUN npm ci
 
 COPY . .
 
-EXPOSE 8012
+EXPOSE 8017
 CMD ["node", "server.js"]
