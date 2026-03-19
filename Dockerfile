@@ -1,3 +1,13 @@
+# ===========================================
+# neu-fund-backend — Dockerfile
+# ===========================================
+# Multi-stage: production (slim) và development (full deps)
+# Sử dụng MongoDB Atlas, không có MongoDB local trong Docker
+#
+# Lưu ý: Dùng Debian (không dùng Alpine) vì onnxruntime-node cần glibc,
+# Alpine dùng musl → lỗi ld-linux-aarch64.so.1
+
+
 FROM node:20-bookworm-slim
 
 # === CÀI SYSTEM DEPENDENCIES CHO SHARP ===
