@@ -277,57 +277,6 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
-
-
-// ============================= METADATA =============================
-const MODEL_META = {
-  "qwen3-8b": { name: "Qwen3 8B", description: "Mô hình mặc định, cân bằng chất lượng và tốc độ" },
-  // "qwen3-1.7b": { name: "Qwen3 1.7B", description: "Nhẹ, nhanh, phù hợp tác vụ đơn giản" },
-  // "qwen3-32b": { name: "Qwen3 32B", description: "Chất lượng cao, phù hợp tác vụ phức tạp" },
-  // "mistral-7b": { name: "Mistral 7B", description: "Mô hình đa ngôn ngữ tốt" },
-  // "llama3.2-3b": { name: "Llama 3.2 3B", description: "Nhẹ, tốc độ cao" },
-  // "qwen2.5-coder-14b": { name: "Qwen2.5 Coder 14B", description: "Tối ưu cho code" },
-  // "deepseek-coder-33b": { name: "DeepSeek Coder 33B", description: "Code chuyên sâu" },
-  // "gemma3-27b": { name: "Gemma3 27B", description: "Chất lượng cao từ Google" },
-  // "deepseek-r1-32b": { name: "DeepSeek R1 32B", description: "Lý luận mạnh" },
-};
-
-const METADATA_DATA = {
-  name: "Hội thảo, Tạp chí",
-  description:
-    "Tìm kiếm, hỏi đáp, tổng hợp các Quỹ tài trợ nghiên cứu,... phục vụ hoạt động nghiên cứu khoa học của cán bộ, giảng viên, học viên,... của Đại học Kinh tế Quốc dân",
-  version: "1.2.0",
-  developer: "Nhóm thầy V Huy, V Minh, X Lâm",
-  capabilities: ["search", "explain", "summarize"],
-  sample_prompts: [
-    "Các quỹ và nguồn tài trợ Kinh tế Xanh nổi bật?",
-    "Các quỹ và nguồn tài trợ về Phát triển bền vững trong lĩnh vực Kinh tế?",
-    "Hãy gợi ý một số quỹ tài trợ phù hợp cho các nghiên cứu về CNTT?",
-    "Quỹ nghiên cứu phù hợp với nghiên cứu sinh ngành Marketing?"
-  ],
-  provided_data_types: [
-    { type: "funds", description: "Danh sách các quỹ tài trợ trong nước và quốc tế mà NEU Research Agent đang lưu trữ" }
-  ],
-  contact: "kcntt@neu.edu.vn",
-  status: "active",
-};
-
-function handleMetadata(req, res) {
-  const supported_models = Object.entries(modelMap).map(([model_id, { provider, model }]) => ({
-    model_id,
-    provider,
-    model,
-    name: (MODEL_META[model_id] || {}).name || model_id,
-    description: (MODEL_META[model_id] || {}).description || "",
-  }));
-  // AI Portal chuẩn: metadata ở root, không wrap trong {ok, status, data}
-  res.json({ ...METADATA_DATA, supported_models });
-}
-
-app.get("/api/metadata", handleMetadata);
-app.get("/v1/metadata", handleMetadata);
-
-
 app.get("/api/funds", async (req, res) => {
   try {
     const { q } = req.query;
