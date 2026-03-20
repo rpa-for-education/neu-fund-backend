@@ -12,7 +12,7 @@ services:
       dockerfile: Dockerfile
     container_name: neu-fund-backend
     ports:
-      - "8017:8017"
+      - "8018:8018"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
